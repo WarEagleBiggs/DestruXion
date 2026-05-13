@@ -20,6 +20,9 @@ namespace Destruxion.Voxels
         [SerializeField] bool generateColliders = true;
         [SerializeField] bool markStatic = true;
         [SerializeField, Min(0)] int maxVoxels;
+        [SerializeField, Min(0.005f)] float impactRadius = 0.025f;
+        [SerializeField, Min(1)] int maxVoxelsPerHit = 6;
+        [SerializeField, Min(1)] int debrisChunkSize = 2;
 
         [Header("Material")]
         [SerializeField] Material voxelMaterial;
@@ -57,18 +60,26 @@ namespace Destruxion.Voxels
 
             var offset = centerOnOrigin ? CalculateCenterOffset(voxels) : Vector3.zero;
             var world = generatedRoot.AddComponent<VoxelWorld>();
-            world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic);
+            world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic, impactRadius, maxVoxelsPerHit, debrisChunkSize);
 
             Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}'.", generatedRoot);
         }
 
         public void ClearGeneratedChildren()
         {
-            if (generatedRoot == null)
-                return;
+            if (generatedRoot != null)
+            {
+                DestroyUnityObject(generatedRoot);
+                generatedRoot = null;
+            }
 
-            DestroyUnityObject(generatedRoot);
-            generatedRoot = null;
+            for (var i = transform.childCount - 1; i >= 0; i--)
+            {
+                var child = transform.GetChild(i).gameObject;
+                if (child.name.StartsWith("VoxelChunk", StringComparison.Ordinal) ||
+                    child.name.EndsWith("_VoxelWorld", StringComparison.Ordinal))
+                    DestroyUnityObject(child);
+            }
         }
 
         static bool TryParse(string text, out List<VoxelRecord> voxels)
@@ -226,23 +237,47 @@ namespace Destruxion.Voxels
         }
     }
 
-    public sealed class VoxelWorld : MonoBehaviour
+    [Serializable]
+    struct SerializedVoxelRecord
+    {
+        public Vector3Int position;
+        public Color32 color;
+        public float mass;
+        public VoxelSurfaceType surfaceType;
+
+        public SerializedVoxelRecord(VoxelRecord voxel)
+        {
+            position = voxel.Position;
+            color = voxel.Color;
+            mass = voxel.Mass;
+            surfaceType = voxel.SurfaceType;
+        }
+
+        public VoxelRecord ToVoxelRecord()
+        {
+            return new VoxelRecord(position, color, mass, surfaceType);
+        }
+    }
+
+    public sealed partial class VoxelWorld : MonoBehaviour
     {
         [SerializeField, Min(0.01f)] float voxelSize = 0.1f;
         [SerializeField, Min(1)] int chunkSize = 16;
-        [SerializeField] float activationRadius = 0.35f;
+        [SerializeField] float activationRadius = 0.025f;
+        [SerializeField, Min(1)] int maxVoxelsPerHit = 6;
+        [SerializeField, Min(1)] int debrisChunkSize = 2;
         [SerializeField] float minimumImpactImpulse = 1.5f;
         [SerializeField] float physicsSettleSpeed = 0.04f;
         [SerializeField] float physicsSettleAngularSpeed = 0.08f;
         [SerializeField] float settleDelay = 0.75f;
+        [SerializeField] Material voxelMaterial;
+        [SerializeField] Vector3 originOffset;
+        [SerializeField] bool generateColliders;
+        [SerializeField] bool markStatic;
+        [SerializeField, HideInInspector] List<SerializedVoxelRecord> serializedVoxels = new();
 
         readonly Dictionary<Vector3Int, VoxelRecord> voxels = new();
         readonly Dictionary<Vector3Int, VoxelChunk> chunks = new();
-
-        Material voxelMaterial;
-        Vector3 originOffset;
-        bool generateColliders;
-        bool markStatic;
 
         public int ChunkCount => chunks.Count;
         public float VoxelSize => voxelSize;
@@ -252,6 +287,15 @@ namespace Destruxion.Voxels
         public float PhysicsSettleAngularSpeed => physicsSettleAngularSpeed;
         public float SettleDelay => settleDelay;
 
+        void OnEnable()
+        {
+            if (voxels.Count == 0 && serializedVoxels.Count > 0)
+            {
+                RestoreSerializedVoxels();
+                CacheExistingChunks();
+            }
+        }
+
         public void BuildFrom(
             List<VoxelRecord> sourceVoxels,
             float sourceVoxelSize,
@@ -259,7 +303,10 @@ namespace Destruxion.Voxels
             Vector3 sourceOriginOffset,
             Material sourceMaterial,
             bool sourceGenerateColliders,
-            bool sourceMarkStatic)
+            bool sourceMarkStatic,
+            float sourceActivationRadius,
+            int sourceMaxVoxelsPerHit,
+            int sourceDebrisChunkSize)
         {
             voxelSize = sourceVoxelSize;
             chunkSize = sourceChunkSize;
@@ -267,14 +314,47 @@ namespace Destruxion.Voxels
             voxelMaterial = sourceMaterial;
             generateColliders = sourceGenerateColliders;
             markStatic = sourceMarkStatic;
+            activationRadius = sourceActivationRadius;
+            maxVoxelsPerHit = sourceMaxVoxelsPerHit;
+            debrisChunkSize = sourceDebrisChunkSize;
 
             voxels.Clear();
             chunks.Clear();
+            serializedVoxels.Clear();
 
             for (var i = 0; i < sourceVoxels.Count; i++)
+            {
                 voxels[sourceVoxels[i].Position] = sourceVoxels[i];
+                serializedVoxels.Add(new SerializedVoxelRecord(sourceVoxels[i]));
+            }
 
             RebuildAllChunks();
+        }
+
+        void RestoreSerializedVoxels()
+        {
+            voxels.Clear();
+            chunks.Clear();
+
+            for (var i = 0; i < serializedVoxels.Count; i++)
+            {
+                var voxel = serializedVoxels[i].ToVoxelRecord();
+                voxels[voxel.Position] = voxel;
+            }
+        }
+
+        void CacheExistingChunks()
+        {
+            chunks.Clear();
+            var existingChunks = GetComponentsInChildren<VoxelChunk>(true);
+            for (var i = 0; i < existingChunks.Length; i++)
+            {
+                if (existingChunks[i] == null)
+                    continue;
+
+                existingChunks[i].SetWorld(this);
+                chunks[existingChunks[i].ChunkCoord] = existingChunks[i];
+            }
         }
 
         public bool ContainsVoxel(Vector3Int position) => voxels.ContainsKey(position);
@@ -292,11 +372,52 @@ namespace Destruxion.Voxels
                 Mathf.RoundToInt(local.z / voxelSize));
         }
 
+        public bool TryFindVoxelImpact(Vector3 worldFrom, Vector3 worldTo, float sweepRadius, out Vector3 hitPoint, out Vector3 hitNormal)
+        {
+            hitPoint = worldTo;
+            hitNormal = (worldFrom - worldTo).sqrMagnitude > 0.001f ? (worldFrom - worldTo).normalized : -transform.forward;
+
+            if (voxels.Count == 0)
+                return false;
+
+            var distance = Vector3.Distance(worldFrom, worldTo);
+            var stepDistance = Mathf.Max(voxelSize * 0.25f, 0.01f);
+            var steps = Mathf.Max(1, Mathf.CeilToInt(distance / stepDistance));
+            var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(sweepRadius / voxelSize));
+
+            for (var i = 0; i <= steps; i++)
+            {
+                var sample = Vector3.Lerp(worldFrom, worldTo, (float)i / steps);
+                var center = WorldToVoxel(sample);
+
+                for (var x = -radiusVoxels; x <= radiusVoxels; x++)
+                for (var y = -radiusVoxels; y <= radiusVoxels; y++)
+                for (var z = -radiusVoxels; z <= radiusVoxels; z++)
+                {
+                    var candidate = center + new Vector3Int(x, y, z);
+                    if (!voxels.ContainsKey(candidate))
+                        continue;
+
+                    var voxelCenter = LocalToWorldCenter(candidate);
+                    hitPoint = voxelCenter;
+                    hitNormal = (sample - voxelCenter).sqrMagnitude > 0.001f
+                        ? (sample - voxelCenter).normalized
+                        : (worldFrom - worldTo).normalized;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public void ActivateVoxelsAround(Vector3 worldPosition, Vector3 impulse)
         {
             var center = WorldToVoxel(worldPosition);
             var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(activationRadius / voxelSize));
+            var maxRemoved = Mathf.Max(1, maxVoxelsPerHit);
             var changedChunks = new HashSet<Vector3Int>();
+            var candidates = new List<Vector3Int>();
+            var removedVoxels = new List<VoxelRecord>(maxRemoved);
             var activationImpulse = impulse.sqrMagnitude > 0.001f
                 ? impulse
                 : UnityEngine.Random.insideUnitSphere * minimumImpactImpulse;
@@ -310,15 +431,29 @@ namespace Destruxion.Voxels
                     continue;
 
                 var position = center + offset;
+                if (voxels.ContainsKey(position))
+                    candidates.Add(position);
+            }
+
+            candidates.Sort((a, b) =>
+                (a - center).sqrMagnitude.CompareTo((b - center).sqrMagnitude));
+
+            for (var i = 0; i < candidates.Count && removedVoxels.Count < maxRemoved; i++)
+            {
+                var position = candidates[i];
                 if (!voxels.TryGetValue(position, out var voxel))
                     continue;
 
                 voxels.Remove(position);
                 AddChunkAndNeighbors(position, changedChunks);
-                SpawnPhysicsVoxel(voxel, activationImpulse);
+                removedVoxels.Add(voxel);
             }
 
+            if (removedVoxels.Count == 0)
+                return;
+
             RebuildChunks(changedChunks);
+            SpawnDebrisChunks(removedVoxels, activationImpulse);
         }
 
         public void Restabilize(VoxelPhysicsBlock block)
@@ -333,10 +468,78 @@ namespace Destruxion.Voxels
             UnityEngine.Object.Destroy(block.gameObject);
         }
 
-        void SpawnPhysicsVoxel(VoxelRecord voxel, Vector3 impulse)
+        void SpawnDebrisChunks(List<VoxelRecord> removedVoxels, Vector3 impulse)
+        {
+            if (removedVoxels.Count == 0)
+                return;
+
+            if (removedVoxels.Count <= debrisChunkSize)
+            {
+                SpawnPhysicsVoxelGroup(removedVoxels, impulse);
+                return;
+            }
+
+            var groups = new Dictionary<Vector3Int, List<VoxelRecord>>();
+            for (var i = 0; i < removedVoxels.Count; i++)
+            {
+                var key = GetDebrisGroupCoord(removedVoxels[i].Position);
+                if (!groups.TryGetValue(key, out var group))
+                {
+                    group = new List<VoxelRecord>();
+                    groups.Add(key, group);
+                }
+
+                group.Add(removedVoxels[i]);
+            }
+
+            foreach (var group in groups.Values)
+                SpawnPhysicsVoxelGroup(group, impulse);
+        }
+
+        Vector3Int GetDebrisGroupCoord(Vector3Int position)
+        {
+            return new Vector3Int(
+                FloorDiv(position.x, debrisChunkSize),
+                FloorDiv(position.y, debrisChunkSize),
+                FloorDiv(position.z, debrisChunkSize));
+        }
+
+        void SpawnPhysicsVoxelGroup(List<VoxelRecord> group, Vector3 impulse)
+        {
+            if (group.Count == 0)
+                return;
+
+            var root = new GameObject($"DebrisChunk_{group.Count}");
+            var center = Vector3.zero;
+            var totalMass = 0f;
+
+            for (var i = 0; i < group.Count; i++)
+            {
+                center += LocalToWorldCenter(group[i].Position);
+                totalMass += group[i].Mass;
+            }
+
+            center /= group.Count;
+            root.transform.position = center;
+            root.transform.rotation = transform.rotation;
+
+            for (var i = 0; i < group.Count; i++)
+                SpawnPhysicsVoxel(group[i], root.transform);
+
+            var body = root.AddComponent<Rigidbody>();
+            body.mass = Mathf.Max(0.05f, totalMass);
+            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            body.AddForce(impulse, ForceMode.Impulse);
+            body.AddTorque(UnityEngine.Random.insideUnitSphere * impulse.magnitude * voxelSize, ForceMode.Impulse);
+
+            root.AddComponent<VoxelDebrisChunk>().Initialize(Mathf.Max(minimumImpactImpulse * 1.25f, impulse.magnitude * 0.2f));
+        }
+
+        void SpawnPhysicsVoxel(VoxelRecord voxel, Transform root)
         {
             var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cube.name = $"LooseVoxel_{voxel.Position.x}_{voxel.Position.y}_{voxel.Position.z}";
+            cube.transform.SetParent(root, true);
             cube.transform.position = LocalToWorldCenter(voxel.Position);
             cube.transform.rotation = transform.rotation;
             cube.transform.localScale = Vector3.one * voxelSize;
@@ -348,12 +551,7 @@ namespace Destruxion.Voxels
             propertyBlock.SetColor("_Color", voxel.Color);
             renderer.SetPropertyBlock(propertyBlock);
 
-            var body = cube.AddComponent<Rigidbody>();
-            body.mass = voxel.Mass;
-            body.AddForce(impulse, ForceMode.Impulse);
-
             cube.AddComponent<VoxelBlock>().Initialize(voxel.Color, voxel.Mass, voxel.SurfaceType);
-            cube.AddComponent<VoxelPhysicsBlock>().Initialize(this, voxel.Color, voxel.Mass, voxel.SurfaceType);
         }
 
         void RebuildAllChunks()
@@ -445,7 +643,7 @@ namespace Destruxion.Voxels
     }
 
     [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
-    public sealed class VoxelChunk : MonoBehaviour
+    public sealed partial class VoxelChunk : MonoBehaviour
     {
         static readonly Vector3Int[] Directions =
         {
@@ -478,11 +676,20 @@ namespace Destruxion.Voxels
         };
 
         VoxelWorld world;
+        [SerializeField] Vector3Int chunkCoord;
         Mesh mesh;
+
+        public Vector3Int ChunkCoord => chunkCoord;
+
+        public void SetWorld(VoxelWorld sourceWorld)
+        {
+            world = sourceWorld;
+        }
 
         public void Build(VoxelWorld sourceWorld, Vector3Int chunkCoord, List<VoxelRecord> voxels, Material material, bool generateCollider)
         {
             world = sourceWorld;
+            this.chunkCoord = chunkCoord;
 
             var vertices = new List<Vector3>(voxels.Count * 12);
             var normals = new List<Vector3>(voxels.Count * 12);
@@ -578,6 +785,9 @@ namespace Destruxion.Voxels
             if (world == null || collision.impulse.magnitude < world.MinimumImpactImpulse || collision.contactCount == 0)
                 return;
 
+            if (collision.collider.GetComponent("VoxelProjectile") != null)
+                return;
+
             world.ActivateVoxelsAround(collision.GetContact(0).point, collision.impulse);
         }
 
@@ -591,7 +801,7 @@ namespace Destruxion.Voxels
     }
 
     [RequireComponent(typeof(Rigidbody))]
-    public sealed class VoxelPhysicsBlock : MonoBehaviour
+    public sealed partial class VoxelPhysicsBlock : MonoBehaviour
     {
         VoxelWorld world;
         Rigidbody body;
@@ -631,6 +841,48 @@ namespace Destruxion.Voxels
             {
                 stillTimer = 0f;
             }
+        }
+    }
+
+    public sealed class VoxelDebrisChunk : MonoBehaviour
+    {
+        float breakImpulse = 3f;
+        bool broken;
+
+        public void Initialize(float impulse)
+        {
+            breakImpulse = impulse;
+        }
+
+        public void BreakApart(Vector3 impulse)
+        {
+            if (broken)
+                return;
+
+            broken = true;
+            var parentBody = GetComponent<Rigidbody>();
+            var inheritedVelocity = parentBody != null ? parentBody.linearVelocity : Vector3.zero;
+
+            for (var i = transform.childCount - 1; i >= 0; i--)
+            {
+                var child = transform.GetChild(i);
+                child.SetParent(null, true);
+
+                var body = child.gameObject.AddComponent<Rigidbody>();
+                body.mass = child.TryGetComponent<VoxelBlock>(out var block) ? block.Mass : 0.25f;
+                body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+                body.linearVelocity = inheritedVelocity;
+                body.AddForce(impulse + UnityEngine.Random.insideUnitSphere * impulse.magnitude * 0.35f, ForceMode.Impulse);
+            }
+
+            Destroy(gameObject);
+        }
+
+        void OnCollisionEnter(Collision collision)
+        {
+            if (collision.impulse.magnitude >= breakImpulse &&
+                collision.collider.GetComponent("VoxelProjectile") != null)
+                BreakApart(collision.impulse);
         }
     }
 }
