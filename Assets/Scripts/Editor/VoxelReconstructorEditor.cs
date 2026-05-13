@@ -26,14 +26,14 @@ namespace Destruxion.Editor.Voxels
 
         static void Reconstruct(VoxelReconstructor reconstructor)
         {
-            Undo.RegisterFullObjectHierarchyUndo(reconstructor.gameObject, "Reconstruct Voxels");
+            Undo.RecordObject(reconstructor, "Reconstruct Voxels");
             reconstructor.Reconstruct();
             EditorUtility.SetDirty(reconstructor.gameObject);
         }
 
         static void Clear(VoxelReconstructor reconstructor)
         {
-            Undo.RegisterFullObjectHierarchyUndo(reconstructor.gameObject, "Clear Voxels");
+            Undo.RecordObject(reconstructor, "Clear Voxels");
             reconstructor.ClearGeneratedChildren();
             EditorUtility.SetDirty(reconstructor.gameObject);
         }
