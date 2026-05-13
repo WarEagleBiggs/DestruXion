@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -39,6 +40,7 @@ namespace Destruxion.Voxels
 
         public void Reconstruct()
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             if (voxelTextFile == null)
             {
                 Debug.LogError("Voxel Reconstructor needs a voxel text file before reconstructing.", this);
@@ -51,6 +53,7 @@ namespace Destruxion.Voxels
                 return;
             }
 
+            var parseMilliseconds = stopwatch.ElapsedMilliseconds;
             var count = maxVoxels > 0 ? Mathf.Min(maxVoxels, voxels.Count) : voxels.Count;
             if (count < voxels.Count)
                 voxels.RemoveRange(count, voxels.Count - count);
@@ -66,7 +69,7 @@ namespace Destruxion.Voxels
             var world = generatedRoot.AddComponent<VoxelWorld>();
             world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic, damageRadiusMultiplier, maxVoxelsPerHit, debrisChunkSize);
 
-            Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}'.", generatedRoot);
+            Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}' in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Parse: {parseMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, build: {(stopwatch.ElapsedMilliseconds - parseMilliseconds).ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
         }
 
         public void ClearGeneratedChildren()
@@ -88,28 +91,31 @@ namespace Destruxion.Voxels
 
         static bool TryParse(string text, out List<VoxelRecord> voxels)
         {
-            voxels = new List<VoxelRecord>();
+            voxels = new List<VoxelRecord>(Mathf.Max(1024, text.Length / 32));
 
-            var lines = text.Split(new[] {'\r', '\n'}, StringSplitOptions.RemoveEmptyEntries);
+            var lineNumber = 0;
+            using var reader = new StringReader(text);
             try
             {
-                for (var i = 0; i < lines.Length; i++)
+                while (reader.ReadLine() is { } rawLine)
                 {
+                    lineNumber++;
 #if UNITY_EDITOR
-                    if (i % 2000 == 0)
-                        EditorUtility.DisplayProgressBar("Parsing Voxels", $"{i} / {lines.Length}", (float)i / lines.Length);
+                    if (lineNumber % 5000 == 0)
+                        EditorUtility.DisplayProgressBar("Parsing Voxels", $"{voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels read", Mathf.Repeat(lineNumber * 0.0002f, 1f));
 #endif
 
-                    var line = lines[i].Trim();
+                    var line = rawLine.Trim();
                     if (line.Length == 0 || line.StartsWith("position", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    var parts = line.Split(';');
-                    if (parts.Length != 2 ||
-                        !TryParseVector3Int(parts[0], out var position) ||
-                        !TryParseColor(parts[1], out var color))
+                    var separator = line.IndexOf(';');
+                    if (separator <= 0 ||
+                        separator >= line.Length - 1 ||
+                        !TryParseVector3Int(line, 0, separator, out var position) ||
+                        !TryParseColor(line, separator + 1, line.Length - separator - 1, out var color))
                     {
-                        Debug.LogWarning($"Skipped invalid voxel line {i + 1}: {line}");
+                        Debug.LogWarning($"Skipped invalid voxel line {lineNumber}: {line}");
                         continue;
                     }
 
@@ -126,43 +132,99 @@ namespace Destruxion.Voxels
             return voxels.Count > 0;
         }
 
-        static bool TryParseVector3Int(string value, out Vector3Int result)
+        static bool TryParseVector3Int(string value, int start, int length, out Vector3Int result)
         {
             result = default;
-            if (!TryParseBracketedInts(value, out var numbers) || numbers.Length != 3)
+            if (!TryParseBracketedInt3(value, start, length, out var x, out var y, out var z))
                 return false;
 
-            result = new Vector3Int(numbers[0], numbers[1], numbers[2]);
+            result = new Vector3Int(x, y, z);
             return true;
         }
 
-        static bool TryParseColor(string value, out Color32 result)
+        static bool TryParseColor(string value, int start, int length, out Color32 result)
         {
             result = default;
-            if (!TryParseBracketedInts(value, out var numbers) || numbers.Length != 3)
+            if (!TryParseBracketedInt3(value, start, length, out var r, out var g, out var b))
                 return false;
 
-            result = new Color32(ToByte(numbers[0]), ToByte(numbers[1]), ToByte(numbers[2]), 255);
+            result = new Color32(ToByte(r), ToByte(g), ToByte(b), 255);
             return true;
         }
 
-        static bool TryParseBracketedInts(string value, out int[] numbers)
+        static bool TryParseBracketedInt3(string value, int start, int length, out int first, out int second, out int third)
         {
-            numbers = Array.Empty<int>();
-            value = value.Trim();
+            first = default;
+            second = default;
+            third = default;
 
-            if (value.Length < 5 || value[0] != '[' || value[value.Length - 1] != ']')
+            var end = start + length - 1;
+            while (start <= end && char.IsWhiteSpace(value[start]))
+                start++;
+
+            while (end >= start && char.IsWhiteSpace(value[end]))
+                end--;
+
+            if (end - start < 4 || value[start] != '[' || value[end] != ']')
                 return false;
 
-            var tokens = value.Substring(1, value.Length - 2).Split(',');
-            numbers = new int[tokens.Length];
-            for (var i = 0; i < tokens.Length; i++)
+            var cursor = start + 1;
+            if (!TryReadInt(value, ref cursor, end, out first))
+                return false;
+
+            if (!TryReadSeparator(value, ref cursor, end))
+                return false;
+
+            if (!TryReadInt(value, ref cursor, end, out second))
+                return false;
+
+            if (!TryReadSeparator(value, ref cursor, end))
+                return false;
+
+            if (!TryReadInt(value, ref cursor, end, out third))
+                return false;
+
+            while (cursor < end && char.IsWhiteSpace(value[cursor]))
+                cursor++;
+
+            return cursor == end;
+        }
+
+        static bool TryReadSeparator(string value, ref int cursor, int end)
+        {
+            while (cursor < end && char.IsWhiteSpace(value[cursor]))
+                cursor++;
+
+            if (cursor >= end || value[cursor] != ',')
+                return false;
+
+            cursor++;
+            return true;
+        }
+
+        static bool TryReadInt(string value, ref int cursor, int end, out int number)
+        {
+            number = 0;
+            while (cursor < end && char.IsWhiteSpace(value[cursor]))
+                cursor++;
+
+            var sign = 1;
+            if (cursor < end && value[cursor] == '-')
             {
-                if (!int.TryParse(tokens[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out numbers[i]))
-                    return false;
+                sign = -1;
+                cursor++;
             }
 
-            return true;
+            var foundDigit = false;
+            while (cursor < end && char.IsDigit(value[cursor]))
+            {
+                foundDigit = true;
+                number = number * 10 + value[cursor] - '0';
+                cursor++;
+            }
+
+            number *= sign;
+            return foundDigit;
         }
 
         Material GetVoxelMaterial()
@@ -262,9 +324,9 @@ namespace Destruxion.Voxels
         {
             return profile switch
             {
-                VoxelDamageProfile.LightChips => new VoxelDamageSettings(24, 0.8f, 8, 16),
-                VoxelDamageProfile.HeavyBreach => new VoxelDamageSettings(24, 1.9f, 48, 96),
-                _ => new VoxelDamageSettings(24, 1.35f, 24, 64)
+                VoxelDamageProfile.LightChips => new VoxelDamageSettings(32, 0.9f, 12, 32),
+                VoxelDamageProfile.HeavyBreach => new VoxelDamageSettings(32, 2.8f, 220, 512),
+                _ => new VoxelDamageSettings(32, 2.2f, 96, 256)
             };
         }
     }
@@ -314,6 +376,8 @@ namespace Destruxion.Voxels
         [SerializeField] float damageRadiusMultiplier = 1.35f;
         [SerializeField, Min(1)] int maxVoxelsPerHit = 6;
         [SerializeField, Min(1)] int debrisChunkSize = 64;
+        [SerializeField, Min(0)] int unsupportedSearchPadding = 8;
+        [SerializeField, Min(1)] int maxUnsupportedVoxelsPerHit = 180;
         [SerializeField] float minimumImpactImpulse = 1.5f;
         [SerializeField] float physicsSettleSpeed = 0.04f;
         [SerializeField] float physicsSettleAngularSpeed = 0.08f;
@@ -326,6 +390,7 @@ namespace Destruxion.Voxels
 
         readonly Dictionary<Vector3Int, VoxelRecord> voxels = new();
         readonly Dictionary<Vector3Int, VoxelChunk> chunks = new();
+        readonly Dictionary<Vector3Int, List<VoxelRecord>> chunkVoxelCache = new();
 
         public int ChunkCount => chunks.Count;
         public float VoxelSize => voxelSize;
@@ -368,11 +433,12 @@ namespace Destruxion.Voxels
 
             voxels.Clear();
             chunks.Clear();
+            chunkVoxelCache.Clear();
             serializedVoxels.Clear();
 
             for (var i = 0; i < sourceVoxels.Count; i++)
             {
-                voxels[sourceVoxels[i].Position] = sourceVoxels[i];
+                AddVoxel(sourceVoxels[i]);
                 serializedVoxels.Add(new SerializedVoxelRecord(sourceVoxels[i]));
             }
 
@@ -383,11 +449,12 @@ namespace Destruxion.Voxels
         {
             voxels.Clear();
             chunks.Clear();
+            chunkVoxelCache.Clear();
 
             for (var i = 0; i < serializedVoxels.Count; i++)
             {
                 var voxel = serializedVoxels[i].ToVoxelRecord();
-                voxels[voxel.Position] = voxel;
+                AddVoxel(voxel);
             }
         }
 
@@ -469,6 +536,7 @@ namespace Destruxion.Voxels
             var changedChunks = new HashSet<Vector3Int>();
             var candidates = new List<Vector3Int>();
             var removedVoxels = new List<VoxelRecord>(maxRemoved);
+            var removedPositions = new List<Vector3Int>(maxRemoved);
             var activationImpulse = impulse.sqrMagnitude > 0.001f
                 ? impulse
                 : UnityEngine.Random.insideUnitSphere * minimumImpactImpulse;
@@ -495,23 +563,109 @@ namespace Destruxion.Voxels
                 if (!voxels.TryGetValue(position, out var voxel))
                     continue;
 
-                voxels.Remove(position);
+                RemoveVoxel(position);
                 AddChunkAndNeighbors(position, changedChunks);
                 removedVoxels.Add(voxel);
+                removedPositions.Add(position);
             }
 
             if (removedVoxels.Count == 0)
                 return;
 
+            ReleaseUnsupportedVoxels(center, radiusVoxels + unsupportedSearchPadding, removedPositions, removedVoxels, changedChunks);
             RebuildChunks(changedChunks);
             SpawnDebrisChunks(removedVoxels, activationImpulse);
+        }
+
+        void ReleaseUnsupportedVoxels(
+            Vector3Int center,
+            int searchRadius,
+            List<Vector3Int> removedPositions,
+            List<VoxelRecord> releasedVoxels,
+            HashSet<Vector3Int> changedChunks)
+        {
+            if (removedPositions.Count == 0 || maxUnsupportedVoxelsPerHit <= 0)
+                return;
+
+            var visited = new HashSet<Vector3Int>();
+            var starts = new Queue<Vector3Int>();
+            var component = new List<Vector3Int>();
+            var queue = new Queue<Vector3Int>();
+
+            for (var i = 0; i < removedPositions.Count; i++)
+            {
+                for (var direction = 0; direction < SixDirections.Length; direction++)
+                {
+                    var neighbor = removedPositions[i] + SixDirections[direction];
+                    if (voxels.ContainsKey(neighbor))
+                        starts.Enqueue(neighbor);
+                }
+            }
+
+            while (starts.Count > 0 && releasedVoxels.Count < maxVoxelsPerHit + maxUnsupportedVoxelsPerHit)
+            {
+                var start = starts.Dequeue();
+                if (visited.Contains(start) || !voxels.ContainsKey(start))
+                    continue;
+
+                component.Clear();
+                queue.Clear();
+                queue.Enqueue(start);
+                visited.Add(start);
+
+                var anchored = false;
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    component.Add(current);
+
+                    if (IsOutsideLocalSearch(current, center, searchRadius))
+                        anchored = true;
+
+                    if (component.Count > maxUnsupportedVoxelsPerHit)
+                    {
+                        anchored = true;
+                        break;
+                    }
+
+                    for (var direction = 0; direction < SixDirections.Length; direction++)
+                    {
+                        var neighbor = current + SixDirections[direction];
+                        if (visited.Contains(neighbor) || !voxels.ContainsKey(neighbor))
+                            continue;
+
+                        visited.Add(neighbor);
+                        queue.Enqueue(neighbor);
+                    }
+                }
+
+                if (anchored)
+                    continue;
+
+                for (var i = 0; i < component.Count; i++)
+                {
+                    if (!voxels.TryGetValue(component[i], out var voxel))
+                        continue;
+
+                    RemoveVoxel(component[i]);
+                    AddChunkAndNeighbors(component[i], changedChunks);
+                    releasedVoxels.Add(voxel);
+                }
+            }
+        }
+
+        static bool IsOutsideLocalSearch(Vector3Int position, Vector3Int center, int searchRadius)
+        {
+            return Mathf.Abs(position.x - center.x) >= searchRadius ||
+                   Mathf.Abs(position.y - center.y) >= searchRadius ||
+                   Mathf.Abs(position.z - center.z) >= searchRadius;
         }
 
         public void Restabilize(VoxelPhysicsBlock block)
         {
             var position = WorldToVoxel(block.transform.position);
             var voxel = new VoxelRecord(position, block.SourceColor, block.Mass, block.SurfaceType);
-            voxels[position] = voxel;
+            AddVoxel(voxel);
 
             var changedChunks = new HashSet<Vector3Int>();
             AddChunkAndNeighbors(position, changedChunks);
@@ -524,23 +678,67 @@ namespace Destruxion.Voxels
             if (removedVoxels.Count == 0)
                 return;
 
-            if (removedVoxels.Count <= debrisChunkSize)
+            var byPosition = new Dictionary<Vector3Int, VoxelRecord>(removedVoxels.Count);
+            for (var i = 0; i < removedVoxels.Count; i++)
+                byPosition[removedVoxels[i].Position] = removedVoxels[i];
+
+            var visited = new HashSet<Vector3Int>();
+            var queue = new Queue<Vector3Int>();
+            var connectedGroup = new List<VoxelRecord>();
+
+            for (var i = 0; i < removedVoxels.Count; i++)
             {
-                SpawnPhysicsVoxelGroup(removedVoxels, impulse);
+                var start = removedVoxels[i].Position;
+                if (visited.Contains(start))
+                    continue;
+
+                connectedGroup.Clear();
+                queue.Clear();
+                queue.Enqueue(start);
+                visited.Add(start);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    connectedGroup.Add(byPosition[current]);
+
+                    for (var direction = 0; direction < SixDirections.Length; direction++)
+                    {
+                        var neighbor = current + SixDirections[direction];
+                        if (visited.Contains(neighbor) || !byPosition.ContainsKey(neighbor))
+                            continue;
+
+                        visited.Add(neighbor);
+                        queue.Enqueue(neighbor);
+                    }
+                }
+
+                SpawnConnectedDebrisGroup(connectedGroup, impulse);
+            }
+        }
+
+        void SpawnConnectedDebrisGroup(List<VoxelRecord> connectedGroup, Vector3 impulse)
+        {
+            if (connectedGroup.Count == 0)
+                return;
+
+            if (connectedGroup.Count <= debrisChunkSize)
+            {
+                SpawnPhysicsVoxelGroup(connectedGroup, impulse);
                 return;
             }
 
             var groups = new Dictionary<Vector3Int, List<VoxelRecord>>();
-            for (var i = 0; i < removedVoxels.Count; i++)
+            for (var i = 0; i < connectedGroup.Count; i++)
             {
-                var key = GetDebrisGroupCoord(removedVoxels[i].Position);
+                var key = GetDebrisGroupCoord(connectedGroup[i].Position);
                 if (!groups.TryGetValue(key, out var group))
                 {
                     group = new List<VoxelRecord>();
                     groups.Add(key, group);
                 }
 
-                group.Add(removedVoxels[i]);
+                group.Add(connectedGroup[i]);
             }
 
             foreach (var group in groups.Values)
@@ -574,8 +772,8 @@ namespace Destruxion.Voxels
             root.transform.position = center;
             root.transform.rotation = transform.rotation;
 
-            for (var i = 0; i < group.Count; i++)
-                SpawnPhysicsVoxel(group[i], root.transform);
+            BuildDebrisMesh(root, group);
+            AddDebrisColliders(root, group);
 
             var body = root.AddComponent<Rigidbody>();
             body.mass = Mathf.Max(0.05f, totalMass);
@@ -583,27 +781,106 @@ namespace Destruxion.Voxels
             body.AddForce(impulse, ForceMode.Impulse);
             body.AddTorque(UnityEngine.Random.insideUnitSphere * impulse.magnitude * voxelSize, ForceMode.Impulse);
 
-            root.AddComponent<VoxelDebrisChunk>().Initialize(Mathf.Max(minimumImpactImpulse * 1.25f, impulse.magnitude * 0.2f));
+            root.AddComponent<VoxelDebrisChunk>().Initialize(
+                Mathf.Max(minimumImpactImpulse * 1.25f, impulse.magnitude * 0.2f),
+                group.ToArray(),
+                voxelSize,
+                voxelMaterial);
         }
 
-        void SpawnPhysicsVoxel(VoxelRecord voxel, Transform root)
+        void BuildDebrisMesh(GameObject root, List<VoxelRecord> group)
         {
-            var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            cube.name = $"LooseVoxel_{voxel.Position.x}_{voxel.Position.y}_{voxel.Position.z}";
-            cube.transform.SetParent(root, true);
-            cube.transform.position = LocalToWorldCenter(voxel.Position);
-            cube.transform.rotation = transform.rotation;
-            cube.transform.localScale = Vector3.one * voxelSize;
+            var groupPositions = new HashSet<Vector3Int>();
+            for (var i = 0; i < group.Count; i++)
+                groupPositions.Add(group[i].Position);
 
-            var renderer = cube.GetComponent<Renderer>();
-            renderer.sharedMaterial = voxelMaterial;
-            var propertyBlock = new MaterialPropertyBlock();
-            propertyBlock.SetColor("_BaseColor", voxel.Color);
-            propertyBlock.SetColor("_Color", voxel.Color);
-            renderer.SetPropertyBlock(propertyBlock);
+            var vertices = new List<Vector3>(group.Count * 12);
+            var normals = new List<Vector3>(group.Count * 12);
+            var colors = new List<Color32>(group.Count * 12);
+            var triangles = new List<int>(group.Count * 18);
 
-            cube.AddComponent<VoxelBlock>().Initialize(voxel.Color, voxel.Mass, voxel.SurfaceType);
+            for (var i = 0; i < group.Count; i++)
+            {
+                var localCenter = root.transform.InverseTransformPoint(LocalToWorldCenter(group[i].Position));
+                for (var face = 0; face < DebrisDirections.Length; face++)
+                {
+                    if (groupPositions.Contains(group[i].Position + DebrisDirections[face]))
+                        continue;
+
+                    var vertexIndex = vertices.Count;
+                    for (var corner = 0; corner < 4; corner++)
+                    {
+                        vertices.Add(localCenter + DebrisFaceCorners[face, corner] * voxelSize);
+                        normals.Add(DebrisNormals[face]);
+                        colors.Add(group[i].Color);
+                    }
+
+                    triangles.Add(vertexIndex);
+                    triangles.Add(vertexIndex + 2);
+                    triangles.Add(vertexIndex + 1);
+                    triangles.Add(vertexIndex);
+                    triangles.Add(vertexIndex + 3);
+                    triangles.Add(vertexIndex + 2);
+                }
+            }
+
+            var mesh = new Mesh
+            {
+                name = $"{root.name}_Mesh"
+            };
+
+            if (vertices.Count > 65535)
+                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+
+            mesh.SetVertices(vertices);
+            mesh.SetNormals(normals);
+            mesh.SetColors(colors);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateBounds();
+
+            root.AddComponent<MeshFilter>().sharedMesh = mesh;
+            root.AddComponent<MeshRenderer>().sharedMaterial = voxelMaterial;
         }
+
+        void AddDebrisColliders(GameObject root, List<VoxelRecord> group)
+        {
+            for (var i = 0; i < group.Count; i++)
+            {
+                var collider = root.AddComponent<BoxCollider>();
+                collider.center = root.transform.InverseTransformPoint(LocalToWorldCenter(group[i].Position));
+                collider.size = Vector3.one * voxelSize;
+            }
+        }
+
+        static readonly Vector3Int[] DebrisDirections =
+        {
+            Vector3Int.right,
+            Vector3Int.left,
+            Vector3Int.up,
+            Vector3Int.down,
+            new(0, 0, 1),
+            new(0, 0, -1)
+        };
+
+        static readonly Vector3[,] DebrisFaceCorners =
+        {
+            {new(0.5f, -0.5f, -0.5f), new(0.5f, -0.5f, 0.5f), new(0.5f, 0.5f, 0.5f), new(0.5f, 0.5f, -0.5f)},
+            {new(-0.5f, -0.5f, 0.5f), new(-0.5f, -0.5f, -0.5f), new(-0.5f, 0.5f, -0.5f), new(-0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, 0.5f, -0.5f), new(0.5f, 0.5f, -0.5f), new(0.5f, 0.5f, 0.5f), new(-0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, -0.5f, 0.5f), new(0.5f, -0.5f, 0.5f), new(0.5f, -0.5f, -0.5f), new(-0.5f, -0.5f, -0.5f)},
+            {new(0.5f, -0.5f, 0.5f), new(-0.5f, -0.5f, 0.5f), new(-0.5f, 0.5f, 0.5f), new(0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, -0.5f, -0.5f), new(0.5f, -0.5f, -0.5f), new(0.5f, 0.5f, -0.5f), new(-0.5f, 0.5f, -0.5f)}
+        };
+
+        static readonly Vector3[] DebrisNormals =
+        {
+            Vector3.right,
+            Vector3.left,
+            Vector3.up,
+            Vector3.down,
+            Vector3.forward,
+            Vector3.back
+        };
 
         void RebuildAllChunks()
         {
@@ -613,8 +890,8 @@ namespace Destruxion.Voxels
             chunks.Clear();
 
             var chunkCoords = new HashSet<Vector3Int>();
-            foreach (var voxel in voxels.Keys)
-                chunkCoords.Add(GetChunkCoord(voxel));
+            foreach (var chunkCoord in chunkVoxelCache.Keys)
+                chunkCoords.Add(chunkCoord);
 
             RebuildChunks(chunkCoords);
         }
@@ -650,14 +927,55 @@ namespace Destruxion.Voxels
 
         List<VoxelRecord> GetChunkVoxels(Vector3Int chunkCoord)
         {
-            var chunkVoxels = new List<VoxelRecord>();
-            foreach (var voxel in voxels.Values)
+            return chunkVoxelCache.TryGetValue(chunkCoord, out var chunkVoxels)
+                ? chunkVoxels
+                : new List<VoxelRecord>(0);
+        }
+
+        void AddVoxel(VoxelRecord voxel)
+        {
+            voxels[voxel.Position] = voxel;
+
+            var chunkCoord = GetChunkCoord(voxel.Position);
+            if (!chunkVoxelCache.TryGetValue(chunkCoord, out var chunkVoxels))
             {
-                if (GetChunkCoord(voxel.Position) == chunkCoord)
-                    chunkVoxels.Add(voxel);
+                chunkVoxels = new List<VoxelRecord>();
+                chunkVoxelCache.Add(chunkCoord, chunkVoxels);
             }
 
-            return chunkVoxels;
+            for (var i = 0; i < chunkVoxels.Count; i++)
+            {
+                if (chunkVoxels[i].Position == voxel.Position)
+                {
+                    chunkVoxels[i] = voxel;
+                    return;
+                }
+            }
+
+            chunkVoxels.Add(voxel);
+        }
+
+        void RemoveVoxel(Vector3Int position)
+        {
+            voxels.Remove(position);
+
+            var chunkCoord = GetChunkCoord(position);
+            if (!chunkVoxelCache.TryGetValue(chunkCoord, out var chunkVoxels))
+                return;
+
+            for (var i = chunkVoxels.Count - 1; i >= 0; i--)
+            {
+                if (chunkVoxels[i].Position != position)
+                    continue;
+
+                var lastIndex = chunkVoxels.Count - 1;
+                chunkVoxels[i] = chunkVoxels[lastIndex];
+                chunkVoxels.RemoveAt(lastIndex);
+                break;
+            }
+
+            if (chunkVoxels.Count == 0)
+                chunkVoxelCache.Remove(chunkCoord);
         }
 
         Vector3Int GetChunkCoord(Vector3Int position)
@@ -691,6 +1009,16 @@ namespace Destruxion.Voxels
             else
                 UnityEngine.Object.DestroyImmediate(target);
         }
+
+        static readonly Vector3Int[] SixDirections =
+        {
+            Vector3Int.right,
+            Vector3Int.left,
+            Vector3Int.up,
+            Vector3Int.down,
+            new(0, 0, 1),
+            new(0, 0, -1)
+        };
     }
 
     [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
@@ -742,10 +1070,10 @@ namespace Destruxion.Voxels
             world = sourceWorld;
             this.chunkCoord = chunkCoord;
 
-            var vertices = new List<Vector3>(voxels.Count * 12);
-            var normals = new List<Vector3>(voxels.Count * 12);
-            var colors = new List<Color32>(voxels.Count * 12);
-            var triangles = new List<int>(voxels.Count * 18);
+            var vertices = new List<Vector3>(voxels.Count * 8);
+            var normals = new List<Vector3>(voxels.Count * 8);
+            var colors = new List<Color32>(voxels.Count * 8);
+            var triangles = new List<int>(voxels.Count * 12);
 
             for (var i = 0; i < voxels.Count; i++)
                 AddVisibleFaces(voxels[i], vertices, normals, colors, triangles);
@@ -798,22 +1126,12 @@ namespace Destruxion.Voxels
             List<int> triangles)
         {
             var center = world.VoxelToLocalCenter(voxel.Position);
-            var isSurfaceVoxel = false;
 
             for (var face = 0; face < Directions.Length; face++)
             {
-                if (!world.ContainsVoxel(voxel.Position + Directions[face]))
-                {
-                    isSurfaceVoxel = true;
-                    break;
-                }
-            }
+                if (world.ContainsVoxel(voxel.Position + Directions[face]))
+                    continue;
 
-            if (!isSurfaceVoxel)
-                return;
-
-            for (var face = 0; face < Directions.Length; face++)
-            {
                 var vertexIndex = vertices.Count;
                 for (var corner = 0; corner < 4; corner++)
                 {
@@ -891,11 +1209,17 @@ namespace Destruxion.Voxels
     public sealed class VoxelDebrisChunk : MonoBehaviour
     {
         float breakImpulse = 3f;
+        float voxelSize = 0.1f;
+        Material voxelMaterial;
+        VoxelRecord[] sourceVoxels = Array.Empty<VoxelRecord>();
         bool broken;
 
-        public void Initialize(float impulse)
+        public void Initialize(float impulse, VoxelRecord[] voxels, float sourceVoxelSize, Material sourceMaterial)
         {
             breakImpulse = impulse;
+            sourceVoxels = voxels ?? Array.Empty<VoxelRecord>();
+            voxelSize = sourceVoxelSize;
+            voxelMaterial = sourceMaterial;
         }
 
         public void BreakApart(Vector3 impulse)
@@ -907,19 +1231,63 @@ namespace Destruxion.Voxels
             var parentBody = GetComponent<Rigidbody>();
             var inheritedVelocity = parentBody != null ? parentBody.linearVelocity : Vector3.zero;
 
-            for (var i = transform.childCount - 1; i >= 0; i--)
+            if (sourceVoxels.Length > 0)
             {
-                var child = transform.GetChild(i);
-                child.SetParent(null, true);
+                for (var i = 0; i < sourceVoxels.Length; i++)
+                    SpawnLooseVoxel(sourceVoxels[i], inheritedVelocity, impulse);
+            }
+            else
+            {
+                for (var i = transform.childCount - 1; i >= 0; i--)
+                {
+                    var child = transform.GetChild(i);
+                    child.SetParent(null, true);
 
-                var body = child.gameObject.AddComponent<Rigidbody>();
-                body.mass = child.TryGetComponent<VoxelBlock>(out var block) ? block.Mass : 0.25f;
-                body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-                body.linearVelocity = inheritedVelocity;
-                body.AddForce(impulse + UnityEngine.Random.insideUnitSphere * impulse.magnitude * 0.35f, ForceMode.Impulse);
+                    var body = child.gameObject.AddComponent<Rigidbody>();
+                    body.mass = child.TryGetComponent<VoxelBlock>(out var block) ? block.Mass : 0.25f;
+                    body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+                    body.linearVelocity = inheritedVelocity;
+                    body.AddForce(impulse + UnityEngine.Random.insideUnitSphere * impulse.magnitude * 0.35f, ForceMode.Impulse);
+                }
             }
 
             Destroy(gameObject);
+        }
+
+        void SpawnLooseVoxel(VoxelRecord voxel, Vector3 inheritedVelocity, Vector3 impulse)
+        {
+            var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            cube.name = $"LooseVoxel_{voxel.Position.x}_{voxel.Position.y}_{voxel.Position.z}";
+            cube.transform.position = transform.position + transform.rotation * (((Vector3)voxel.Position * voxelSize) - GetAverageLocalPosition());
+            cube.transform.rotation = transform.rotation;
+            cube.transform.localScale = Vector3.one * voxelSize;
+
+            var renderer = cube.GetComponent<Renderer>();
+            renderer.sharedMaterial = voxelMaterial;
+            var propertyBlock = new MaterialPropertyBlock();
+            propertyBlock.SetColor("_BaseColor", voxel.Color);
+            propertyBlock.SetColor("_Color", voxel.Color);
+            renderer.SetPropertyBlock(propertyBlock);
+
+            var body = cube.AddComponent<Rigidbody>();
+            body.mass = Mathf.Max(0.05f, voxel.Mass);
+            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            body.linearVelocity = inheritedVelocity;
+            body.AddForce(impulse + UnityEngine.Random.insideUnitSphere * impulse.magnitude * 0.35f, ForceMode.Impulse);
+
+            cube.AddComponent<VoxelBlock>().Initialize(voxel.Color, voxel.Mass, voxel.SurfaceType);
+        }
+
+        Vector3 GetAverageLocalPosition()
+        {
+            if (sourceVoxels.Length == 0)
+                return Vector3.zero;
+
+            var center = Vector3.zero;
+            for (var i = 0; i < sourceVoxels.Length; i++)
+                center += (Vector3)sourceVoxels[i].Position * voxelSize;
+
+            return center / sourceVoxels.Length;
         }
 
         void OnCollisionEnter(Collision collision)
