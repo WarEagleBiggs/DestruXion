@@ -100,7 +100,7 @@ public class VoxelProjectile : MonoBehaviour
             return;
 
         if (world != null)
-            world.ActivateVoxelsAround(hitPoint, direction * impactImpulse);
+            world.ActivateVoxelsAround(hitPoint, direction * impactImpulse, radius);
 
         Bounce(hitPoint, hitNormal);
     }

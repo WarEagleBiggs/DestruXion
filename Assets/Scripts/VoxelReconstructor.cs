@@ -14,18 +14,21 @@ namespace Destruxion.Voxels
         [SerializeField] TextAsset voxelTextFile;
 
         [Header("Build")]
-        [SerializeField, Min(0.01f)] float voxelSize = 0.1f;
+        [SerializeField, Min(0.01f)] float voxelSize = 0.02f;
         [SerializeField] bool centerOnOrigin = true;
-        [SerializeField, Min(1)] int chunkSize = 16;
-        [SerializeField] bool generateColliders = true;
-        [SerializeField] bool markStatic = true;
-        [SerializeField, Min(0)] int maxVoxels;
-        [SerializeField, Min(0.005f)] float impactRadius = 0.025f;
-        [SerializeField, Min(1)] int maxVoxelsPerHit = 6;
-        [SerializeField, Min(1)] int debrisChunkSize = 2;
+
+        [Header("Destruction")]
+        [SerializeField] VoxelDamageProfile damageProfile = VoxelDamageProfile.DrywallHammer;
 
         [Header("Material")]
         [SerializeField] Material voxelMaterial;
+        [SerializeField, HideInInspector, Min(1)] int chunkSize = 24;
+        [SerializeField, HideInInspector] bool generateColliders = true;
+        [SerializeField, HideInInspector] bool markStatic = true;
+        [SerializeField, HideInInspector, Min(0)] int maxVoxels;
+        [SerializeField, HideInInspector, Min(0.25f)] float damageRadiusMultiplier = 1.35f;
+        [SerializeField, HideInInspector, Min(1)] int maxVoxelsPerHit = 24;
+        [SerializeField, HideInInspector, Min(1)] int debrisChunkSize = 64;
         [SerializeField, HideInInspector] GameObject generatedRoot;
 
         public TextAsset VoxelTextFile
@@ -53,6 +56,7 @@ namespace Destruxion.Voxels
                 voxels.RemoveRange(count, voxels.Count - count);
 
             ClearGeneratedChildren();
+            ApplyDamageProfile();
 
             generatedRoot = new GameObject($"{voxelTextFile.name}_VoxelWorld");
             generatedRoot.transform.SetParent(transform, false);
@@ -60,7 +64,7 @@ namespace Destruxion.Voxels
 
             var offset = centerOnOrigin ? CalculateCenterOffset(voxels) : Vector3.zero;
             var world = generatedRoot.AddComponent<VoxelWorld>();
-            world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic, impactRadius, maxVoxelsPerHit, debrisChunkSize);
+            world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic, damageRadiusMultiplier, maxVoxelsPerHit, debrisChunkSize);
 
             Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}'.", generatedRoot);
         }
@@ -195,6 +199,17 @@ namespace Destruxion.Voxels
             return -((Vector3)(min + max) * 0.5f * voxelSize);
         }
 
+        void ApplyDamageProfile()
+        {
+            var settings = VoxelDamageSettings.ForProfile(damageProfile);
+            chunkSize = settings.ChunkSize;
+            damageRadiusMultiplier = settings.DamageRadiusMultiplier;
+            maxVoxelsPerHit = settings.MaxVoxelsPerHit;
+            debrisChunkSize = settings.DebrisChunkSize;
+            generateColliders = true;
+            markStatic = true;
+        }
+
         static byte ToByte(int value) => (byte)Mathf.Clamp(value, byte.MinValue, byte.MaxValue);
 
         static float EstimateMass(Color32 color)
@@ -218,6 +233,39 @@ namespace Destruxion.Voxels
                 UnityEngine.Object.Destroy(target);
             else
                 UnityEngine.Object.DestroyImmediate(target);
+        }
+    }
+
+    public enum VoxelDamageProfile
+    {
+        DrywallHammer,
+        LightChips,
+        HeavyBreach
+    }
+
+    readonly struct VoxelDamageSettings
+    {
+        public readonly int ChunkSize;
+        public readonly float DamageRadiusMultiplier;
+        public readonly int MaxVoxelsPerHit;
+        public readonly int DebrisChunkSize;
+
+        VoxelDamageSettings(int chunkSize, float damageRadiusMultiplier, int maxVoxelsPerHit, int debrisChunkSize)
+        {
+            ChunkSize = chunkSize;
+            DamageRadiusMultiplier = damageRadiusMultiplier;
+            MaxVoxelsPerHit = maxVoxelsPerHit;
+            DebrisChunkSize = debrisChunkSize;
+        }
+
+        public static VoxelDamageSettings ForProfile(VoxelDamageProfile profile)
+        {
+            return profile switch
+            {
+                VoxelDamageProfile.LightChips => new VoxelDamageSettings(24, 0.8f, 8, 16),
+                VoxelDamageProfile.HeavyBreach => new VoxelDamageSettings(24, 1.9f, 48, 96),
+                _ => new VoxelDamageSettings(24, 1.35f, 24, 64)
+            };
         }
     }
 
@@ -263,9 +311,9 @@ namespace Destruxion.Voxels
     {
         [SerializeField, Min(0.01f)] float voxelSize = 0.1f;
         [SerializeField, Min(1)] int chunkSize = 16;
-        [SerializeField] float activationRadius = 0.025f;
+        [SerializeField] float damageRadiusMultiplier = 1.35f;
         [SerializeField, Min(1)] int maxVoxelsPerHit = 6;
-        [SerializeField, Min(1)] int debrisChunkSize = 2;
+        [SerializeField, Min(1)] int debrisChunkSize = 64;
         [SerializeField] float minimumImpactImpulse = 1.5f;
         [SerializeField] float physicsSettleSpeed = 0.04f;
         [SerializeField] float physicsSettleAngularSpeed = 0.08f;
@@ -281,7 +329,7 @@ namespace Destruxion.Voxels
 
         public int ChunkCount => chunks.Count;
         public float VoxelSize => voxelSize;
-        public float ActivationRadius => activationRadius;
+        public float DamageRadiusMultiplier => damageRadiusMultiplier;
         public float MinimumImpactImpulse => minimumImpactImpulse;
         public float PhysicsSettleSpeed => physicsSettleSpeed;
         public float PhysicsSettleAngularSpeed => physicsSettleAngularSpeed;
@@ -304,7 +352,7 @@ namespace Destruxion.Voxels
             Material sourceMaterial,
             bool sourceGenerateColliders,
             bool sourceMarkStatic,
-            float sourceActivationRadius,
+            float sourceDamageRadiusMultiplier,
             int sourceMaxVoxelsPerHit,
             int sourceDebrisChunkSize)
         {
@@ -314,7 +362,7 @@ namespace Destruxion.Voxels
             voxelMaterial = sourceMaterial;
             generateColliders = sourceGenerateColliders;
             markStatic = sourceMarkStatic;
-            activationRadius = sourceActivationRadius;
+            damageRadiusMultiplier = sourceDamageRadiusMultiplier;
             maxVoxelsPerHit = sourceMaxVoxelsPerHit;
             debrisChunkSize = sourceDebrisChunkSize;
 
@@ -410,11 +458,14 @@ namespace Destruxion.Voxels
             return false;
         }
 
-        public void ActivateVoxelsAround(Vector3 worldPosition, Vector3 impulse)
+        public void ActivateVoxelsAround(Vector3 worldPosition, Vector3 impulse, float projectileRadius)
         {
             var center = WorldToVoxel(worldPosition);
-            var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(activationRadius / voxelSize));
-            var maxRemoved = Mathf.Max(1, maxVoxelsPerHit);
+            var effectiveRadius = Mathf.Max(voxelSize * 0.5f, projectileRadius * damageRadiusMultiplier);
+            var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(effectiveRadius / voxelSize));
+            var projectileVoxelRadius = Mathf.Max(1f, effectiveRadius / voxelSize);
+            var projectileScaledLimit = Mathf.CeilToInt(projectileVoxelRadius * projectileVoxelRadius * 2f);
+            var maxRemoved = Mathf.Clamp(projectileScaledLimit, 1, Mathf.Max(1, maxVoxelsPerHit));
             var changedChunks = new HashSet<Vector3Int>();
             var candidates = new List<Vector3Int>();
             var removedVoxels = new List<VoxelRecord>(maxRemoved);
@@ -782,13 +833,6 @@ namespace Destruxion.Voxels
 
         void OnCollisionEnter(Collision collision)
         {
-            if (world == null || collision.impulse.magnitude < world.MinimumImpactImpulse || collision.contactCount == 0)
-                return;
-
-            if (collision.collider.GetComponent("VoxelProjectile") != null)
-                return;
-
-            world.ActivateVoxelsAround(collision.GetContact(0).point, collision.impulse);
         }
 
         static void DestroyUnityObject(UnityEngine.Object target)
@@ -880,9 +924,8 @@ namespace Destruxion.Voxels
 
         void OnCollisionEnter(Collision collision)
         {
-            if (collision.impulse.magnitude >= breakImpulse &&
-                collision.collider.GetComponent("VoxelProjectile") != null)
-                BreakApart(collision.impulse);
+            // Debris chunks stay bonded during normal physics collisions.
+            // VoxelProjectile calls BreakApart directly when hit by a bullet.
         }
     }
 }
