@@ -106,7 +106,11 @@ namespace Destruxion.Editor.Voxels
     [CustomEditor(typeof(MeshVoxelReconstructor))]
     public sealed class MeshVoxelReconstructorEditor : UnityEditor.Editor
     {
+        SerializedProperty sourceMode;
+        SerializedProperty outputMode;
         SerializedProperty sourceRoot;
+        SerializedProperty voxelTextFile;
+        SerializedProperty centerTextVoxelsOnOrigin;
         SerializedProperty voxelSize;
         SerializedProperty resolutionMode;
         SerializedProperty targetResolution;
@@ -121,7 +125,11 @@ namespace Destruxion.Editor.Voxels
 
         void OnEnable()
         {
+            sourceMode = serializedObject.FindProperty("sourceMode");
+            outputMode = serializedObject.FindProperty("outputMode");
             sourceRoot = serializedObject.FindProperty("sourceRoot");
+            voxelTextFile = serializedObject.FindProperty("voxelTextFile");
+            centerTextVoxelsOnOrigin = serializedObject.FindProperty("centerTextVoxelsOnOrigin");
             voxelSize = serializedObject.FindProperty("voxelSize");
             resolutionMode = serializedObject.FindProperty("resolutionMode");
             targetResolution = serializedObject.FindProperty("targetResolution");
@@ -140,26 +148,55 @@ namespace Destruxion.Editor.Voxels
             serializedObject.Update();
 
             EditorGUILayout.LabelField("Input", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(sourceRoot, new GUIContent("Source Root"));
+            EditorGUILayout.PropertyField(sourceMode, new GUIContent("Source Mode"));
+            EditorGUILayout.PropertyField(outputMode, new GUIContent("Output Mode"));
+            var mode = (VoxelSourceMode)sourceMode.enumValueIndex;
+            var output = (VoxelOutputMode)outputMode.enumValueIndex;
+            if (mode == VoxelSourceMode.Mesh)
+            {
+                EditorGUILayout.PropertyField(sourceRoot, new GUIContent("Source Root"));
+            }
+            else
+            {
+                EditorGUILayout.PropertyField(voxelTextFile, new GUIContent("Voxel Text File"));
+                EditorGUILayout.PropertyField(centerTextVoxelsOnOrigin, new GUIContent("Center On Origin"));
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Build", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(resolutionMode, new GUIContent("Resolution Mode"));
-            if ((MeshVoxelResolutionMode)resolutionMode.enumValueIndex == MeshVoxelResolutionMode.TargetMaxDimension)
-                EditorGUILayout.PropertyField(targetResolution, new GUIContent("Resolution"));
+            if (mode == VoxelSourceMode.Mesh)
+            {
+                EditorGUILayout.PropertyField(resolutionMode, new GUIContent("Resolution Mode"));
+                if ((MeshVoxelResolutionMode)resolutionMode.enumValueIndex == MeshVoxelResolutionMode.TargetMaxDimension)
+                    EditorGUILayout.PropertyField(targetResolution, new GUIContent("Resolution"));
+                else
+                    EditorGUILayout.PropertyField(voxelSize, new GUIContent("Voxel Size"));
+                EditorGUILayout.PropertyField(algorithm, new GUIContent("Algorithm"));
+                EditorGUILayout.PropertyField(surfaceThickness, new GUIContent("Surface Thickness"));
+                EditorGUILayout.PropertyField(bakedShadingStrength, new GUIContent("Baked Shading"));
+                EditorGUILayout.PropertyField(cubeColorVariation, new GUIContent("Cube Color Variation"));
+                EditorGUILayout.PropertyField(fillSolid, new GUIContent("Fill Solid Watertight Mesh"));
+                EditorGUILayout.PropertyField(hideSourceRenderers, new GUIContent("Hide Source Mesh"));
+            }
             else
+            {
                 EditorGUILayout.PropertyField(voxelSize, new GUIContent("Voxel Size"));
-            EditorGUILayout.PropertyField(algorithm, new GUIContent("Algorithm"));
-            EditorGUILayout.PropertyField(surfaceThickness, new GUIContent("Surface Thickness"));
-            EditorGUILayout.PropertyField(bakedShadingStrength, new GUIContent("Baked Shading"));
-            EditorGUILayout.PropertyField(cubeColorVariation, new GUIContent("Cube Color Variation"));
-            EditorGUILayout.PropertyField(fillSolid, new GUIContent("Fill Solid Watertight Mesh"));
-            EditorGUILayout.PropertyField(hideSourceRenderers, new GUIContent("Hide Source Mesh"));
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Destruction", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(damageProfile, new GUIContent("Break Style"));
-            EditorGUILayout.HelpBox("For character/creature meshes, leave Fill Solid off. It is only for clean watertight meshes; otherwise it can bridge across holes and turn limbs into slabs. Increase Resolution for shape detail and Surface Thickness for chunk depth.", MessageType.None);
+            if (output == VoxelOutputMode.Destructible)
+            {
+                EditorGUILayout.PropertyField(damageProfile, new GUIContent("Break Style"));
+                EditorGUILayout.HelpBox(mode == VoxelSourceMode.Mesh
+                    ? "For character/creature meshes, leave Fill Solid off. It is only for clean watertight meshes; otherwise it can bridge across holes and turn limbs into slabs. Increase Resolution for shape detail and Surface Thickness for chunk depth."
+                    : "Text File mode reads exported [x,y,z];[r,g,b] voxel data directly. Mesh conversion settings are ignored in this mode.",
+                    MessageType.None);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("Static Visual Only builds one optimized render-only voxel mesh. It has no colliders, no physics, no VoxelWorld, and cannot be broken. Use this for held guns or decoration that never interacts.", MessageType.None);
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Material", EditorStyles.boldLabel);
@@ -171,7 +208,7 @@ namespace Destruxion.Editor.Voxels
             var reconstructor = (MeshVoxelReconstructor)target;
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (GUILayout.Button("Voxelize Mesh"))
+                if (GUILayout.Button(mode == VoxelSourceMode.Mesh ? "Voxelize Mesh" : "Reconstruct Text Voxels"))
                     Voxelize(reconstructor);
 
                 if (GUILayout.Button("Clear Voxels"))

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -13,7 +14,11 @@ namespace Destruxion.Voxels
     public sealed class MeshVoxelReconstructor : MonoBehaviour
     {
         [Header("Input")]
+        [SerializeField] VoxelSourceMode sourceMode = VoxelSourceMode.Mesh;
+        [SerializeField] VoxelOutputMode outputMode = VoxelOutputMode.Destructible;
         [SerializeField] Transform sourceRoot;
+        [SerializeField] TextAsset voxelTextFile;
+        [SerializeField] bool centerTextVoxelsOnOrigin = true;
 
         [Header("Build")]
         [SerializeField, Min(0.01f)] float voxelSize = 0.05f;
@@ -58,6 +63,12 @@ namespace Destruxion.Voxels
                 sourceRoot = transform;
 
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            if (sourceMode == VoxelSourceMode.TextFile)
+            {
+                ReconstructFromText(stopwatch);
+                return;
+            }
+
             var meshSources = CollectMeshSources();
             if (meshSources.Count == 0)
             {
@@ -89,28 +100,86 @@ namespace Destruxion.Voxels
             var voxelizeMilliseconds = stopwatch.ElapsedMilliseconds - triangleMilliseconds;
             ClearGeneratedChildren();
 
-            var settings = VoxelDamageSettings.ForProfile(damageProfile);
-            generatedRoot = new GameObject($"{sourceRoot.name}_VoxelWorld");
+            generatedRoot = new GameObject(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{sourceRoot.name}_VoxelVisual" : $"{sourceRoot.name}_VoxelWorld");
             generatedRoot.transform.SetParent(transform, false);
             generatedRoot.isStatic = true;
 
-            var world = generatedRoot.AddComponent<VoxelWorld>();
-            world.BuildFrom(
-                voxels,
-                activeVoxelSize,
-                settings.ChunkSize,
-                Vector3.zero,
-                GetVoxelMaterial(),
-                true,
-                true,
-                settings.DamageRadiusMultiplier,
-                settings.MaxVoxelsPerHit,
-                settings.DebrisChunkSize);
+            var chunkCount = 1;
+            if (outputMode == VoxelOutputMode.StaticVisualOnly)
+            {
+                BuildStaticVisual(voxels, generatedRoot, GetVoxelMaterial());
+            }
+            else
+            {
+                var settings = VoxelDamageSettings.ForProfile(damageProfile);
+                var world = generatedRoot.AddComponent<VoxelWorld>();
+                world.BuildFrom(
+                    voxels,
+                    activeVoxelSize,
+                    settings.ChunkSize,
+                    Vector3.zero,
+                    GetVoxelMaterial(),
+                    true,
+                    true,
+                    settings.DamageRadiusMultiplier,
+                    settings.MaxVoxelsPerHit,
+                    settings.DebrisChunkSize);
+                chunkCount = world.ChunkCount;
+            }
 
             SetSourceRenderersVisible(!hideSourceRenderers);
             lastFingerprint = CalculateFingerprint();
 
-            Debug.Log($"Voxelized '{sourceRoot.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} chunks at voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Triangles: {triangleMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, voxelize: {voxelizeMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
+            Debug.Log($"Voxelized '{sourceRoot.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Triangles: {triangleMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, voxelize: {voxelizeMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
+        }
+
+        void ReconstructFromText(System.Diagnostics.Stopwatch stopwatch)
+        {
+            if (voxelTextFile == null)
+            {
+                Debug.LogWarning("Mesh Voxel Reconstructor is in Text File mode but no voxel text file is assigned.", this);
+                return;
+            }
+
+            if (!TryParseVoxelText(voxelTextFile.text, out var voxels))
+            {
+                Debug.LogWarning($"Mesh Voxel Reconstructor could not parse voxel text file '{voxelTextFile.name}'.", this);
+                return;
+            }
+
+            ClearGeneratedChildren();
+            SetSourceRenderersVisible(true);
+            activeVoxelSize = Mathf.Max(0.001f, voxelSize);
+
+            generatedRoot = new GameObject(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{voxelTextFile.name}_VoxelVisual" : $"{voxelTextFile.name}_VoxelWorld");
+            generatedRoot.transform.SetParent(transform, false);
+            generatedRoot.isStatic = true;
+
+            var offset = centerTextVoxelsOnOrigin ? CalculateCenterOffset(voxels, activeVoxelSize) : Vector3.zero;
+            var chunkCount = 1;
+            if (outputMode == VoxelOutputMode.StaticVisualOnly)
+            {
+                BuildStaticVisual(voxels, generatedRoot, GetVoxelMaterial(), offset);
+            }
+            else
+            {
+                var settings = VoxelDamageSettings.ForProfile(damageProfile);
+                var world = generatedRoot.AddComponent<VoxelWorld>();
+                world.BuildFrom(
+                    voxels,
+                    activeVoxelSize,
+                    settings.ChunkSize,
+                    offset,
+                    GetVoxelMaterial(),
+                    true,
+                    true,
+                    settings.DamageRadiusMultiplier,
+                    settings.MaxVoxelsPerHit,
+                    settings.DebrisChunkSize);
+                chunkCount = world.ChunkCount;
+            }
+
+            Debug.Log($"Reconstructed text voxel file '{voxelTextFile.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
         }
 
         public void ClearGeneratedChildren()
@@ -158,6 +227,9 @@ namespace Destruxion.Voxels
                     generatedRoot != null && renderer.transform.IsChildOf(generatedRoot.transform))
                     continue;
 
+#if UNITY_EDITOR
+                EnsureMeshReadable(renderer.sharedMesh, renderer.name);
+#endif
                 var bakedMesh = new Mesh {name = $"{renderer.sharedMesh.name}_BakedForVoxels"};
                 renderer.BakeMesh(bakedMesh);
                 sources.Add(new MeshVoxelSource(bakedMesh, renderer, renderer.transform.localToWorldMatrix, renderer.name));
@@ -177,65 +249,75 @@ namespace Destruxion.Voxels
             {
                 for (var i = 0; i < meshSources.Count; i++)
                 {
-                    var sourceMesh = meshSources[i];
-                    var mesh = sourceMesh.Mesh;
-                    var vertices = mesh.vertices;
-                    var renderer = sourceMesh.Renderer;
-                    var materials = renderer != null ? renderer.sharedMaterials : Array.Empty<Material>();
-                    var matrix = worldToLocal * sourceMesh.LocalToWorld;
-                    var uvs = mesh.uv;
-                    var colors = mesh.colors32;
-                    var hasUvs = uvs != null && uvs.Length == vertices.Length;
-                    var hasVertexColors = colors != null && colors.Length == vertices.Length;
-                    if (vertices == null || vertices.Length == 0)
+                    try
                     {
-                        Debug.LogWarning($"Skipped mesh source '{sourceMesh.Name}' because it has no vertices.", this);
-                        continue;
-                    }
-
-                    for (var submesh = 0; submesh < mesh.subMeshCount; submesh++)
-                    {
-                        var indices = mesh.GetIndices(submesh);
-                        if (indices == null || indices.Length < 3)
-                            continue;
-
-                        var source = GetColorSource(materials, submesh);
-                        for (var index = 0; index + 2 < indices.Length; index += 3)
+                        var sourceMesh = meshSources[i];
+                        var mesh = sourceMesh.Mesh;
+#if UNITY_EDITOR
+                        EnsureMeshReadable(mesh, sourceMesh.Name);
+#endif
+                        var vertices = mesh.vertices;
+                        var renderer = sourceMesh.Renderer;
+                        var materials = renderer != null ? renderer.sharedMaterials : Array.Empty<Material>();
+                        var matrix = worldToLocal * sourceMesh.LocalToWorld;
+                        var uvs = mesh.uv;
+                        var colors = mesh.colors32;
+                        var hasUvs = uvs != null && uvs.Length == vertices.Length;
+                        var hasVertexColors = colors != null && colors.Length == vertices.Length;
+                        if (vertices == null || vertices.Length == 0)
                         {
-                            var indexA = indices[index];
-                            var indexB = indices[index + 1];
-                            var indexC = indices[index + 2];
-                            var a = matrix.MultiplyPoint3x4(vertices[indexA]);
-                            var b = matrix.MultiplyPoint3x4(vertices[indexB]);
-                            var c = matrix.MultiplyPoint3x4(vertices[indexC]);
-                            if (Vector3.Cross(b - a, c - a).sqrMagnitude < 0.0000001f)
+                            Debug.LogWarning($"Skipped mesh source '{sourceMesh.Name}' because it has no vertices.", this);
+                            continue;
+                        }
+
+                        for (var submesh = 0; submesh < mesh.subMeshCount; submesh++)
+                        {
+                            var indices = mesh.GetIndices(submesh);
+                            if (indices == null || indices.Length < 3)
                                 continue;
 
-                            var triangle = new VoxelTriangle(
-                                a,
-                                b,
-                                c,
-                                hasUvs ? uvs[indexA] : Vector2.zero,
-                                hasUvs ? uvs[indexB] : Vector2.zero,
-                                hasUvs ? uvs[indexC] : Vector2.zero,
-                                hasVertexColors ? colors[indexA] : source.BaseColor,
-                                hasVertexColors ? colors[indexB] : source.BaseColor,
-                                hasVertexColors ? colors[indexC] : source.BaseColor,
-                                hasUvs,
-                                hasVertexColors,
-                                source);
-                            triangles.Add(triangle);
+                            var source = GetColorSource(materials, submesh);
+                            for (var index = 0; index + 2 < indices.Length; index += 3)
+                            {
+                                var indexA = indices[index];
+                                var indexB = indices[index + 1];
+                                var indexC = indices[index + 2];
+                                var a = matrix.MultiplyPoint3x4(vertices[indexA]);
+                                var b = matrix.MultiplyPoint3x4(vertices[indexB]);
+                                var c = matrix.MultiplyPoint3x4(vertices[indexC]);
+                                if (Vector3.Cross(b - a, c - a).sqrMagnitude < 0.0000001f)
+                                    continue;
 
-                            if (!hasBounds)
-                            {
-                                bounds = triangle.Bounds;
-                                hasBounds = true;
-                            }
-                            else
-                            {
-                                bounds.Encapsulate(triangle.Bounds);
+                                var triangle = new VoxelTriangle(
+                                    a,
+                                    b,
+                                    c,
+                                    hasUvs ? uvs[indexA] : Vector2.zero,
+                                    hasUvs ? uvs[indexB] : Vector2.zero,
+                                    hasUvs ? uvs[indexC] : Vector2.zero,
+                                    hasVertexColors ? colors[indexA] : source.BaseColor,
+                                    hasVertexColors ? colors[indexB] : source.BaseColor,
+                                    hasVertexColors ? colors[indexC] : source.BaseColor,
+                                    hasUvs,
+                                    hasVertexColors,
+                                    source);
+                                triangles.Add(triangle);
+
+                                if (!hasBounds)
+                                {
+                                    bounds = triangle.Bounds;
+                                    hasBounds = true;
+                                }
+                                else
+                                {
+                                    bounds.Encapsulate(triangle.Bounds);
+                                }
                             }
                         }
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogWarning($"Skipped mesh source '{meshSources[i].Name}' because Unity could not read its triangles: {exception.Message}", this);
                     }
                 }
             }
@@ -513,6 +595,204 @@ namespace Destruxion.Voxels
             intersections.Add(new XIntersection(x, color));
         }
 
+        void BuildStaticVisual(List<VoxelRecord> voxels, GameObject root, Material material)
+        {
+            BuildStaticVisual(voxels, root, material, Vector3.zero);
+        }
+
+        void BuildStaticVisual(List<VoxelRecord> voxels, GameObject root, Material material, Vector3 originOffset)
+        {
+            var voxelSet = new HashSet<Vector3Int>();
+            for (var i = 0; i < voxels.Count; i++)
+                voxelSet.Add(voxels[i].Position);
+
+            var vertices = new List<Vector3>(voxels.Count * 8);
+            var normals = new List<Vector3>(voxels.Count * 8);
+            var colors = new List<Color32>(voxels.Count * 8);
+            var triangles = new List<int>(voxels.Count * 12);
+
+            for (var i = 0; i < voxels.Count; i++)
+                AddStaticVoxelFaces(voxels[i], voxelSet, originOffset, vertices, normals, colors, triangles);
+
+            var mesh = new Mesh
+            {
+                name = $"{root.name}_Mesh"
+            };
+
+            if (vertices.Count > 65535)
+                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+
+            mesh.SetVertices(vertices);
+            mesh.SetNormals(normals);
+            mesh.SetColors(colors);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateBounds();
+
+            root.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = root.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            renderer.receiveShadows = true;
+        }
+
+        void AddStaticVoxelFaces(
+            VoxelRecord voxel,
+            HashSet<Vector3Int> voxelSet,
+            Vector3 originOffset,
+            List<Vector3> vertices,
+            List<Vector3> normals,
+            List<Color32> colors,
+            List<int> triangles)
+        {
+            var center = (Vector3)voxel.Position * activeVoxelSize + originOffset;
+            for (var face = 0; face < StaticDirections.Length; face++)
+            {
+                if (voxelSet.Contains(voxel.Position + StaticDirections[face]))
+                    continue;
+
+                var vertexIndex = vertices.Count;
+                for (var corner = 0; corner < 4; corner++)
+                {
+                    vertices.Add(center + StaticFaceCorners[face, corner] * activeVoxelSize);
+                    normals.Add(StaticNormals[face]);
+                    colors.Add(ShadeStaticFace(voxel.Color, StaticNormals[face], voxel.Position));
+                }
+
+                triangles.Add(vertexIndex);
+                triangles.Add(vertexIndex + 2);
+                triangles.Add(vertexIndex + 1);
+                triangles.Add(vertexIndex);
+                triangles.Add(vertexIndex + 3);
+                triangles.Add(vertexIndex + 2);
+            }
+        }
+
+        static bool TryParseVoxelText(string text, out List<VoxelRecord> voxels)
+        {
+            voxels = new List<VoxelRecord>(Mathf.Max(1024, text.Length / 32));
+            using var reader = new StringReader(text);
+            var lineNumber = 0;
+
+            while (reader.ReadLine() is { } rawLine)
+            {
+                lineNumber++;
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("position", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var separator = line.IndexOf(';');
+                if (separator <= 0 ||
+                    separator >= line.Length - 1 ||
+                    !TryParseVector3Int(line, 0, separator, out var position) ||
+                    !TryParseColor(line, separator + 1, line.Length - separator - 1, out var color))
+                {
+                    Debug.LogWarning($"Skipped invalid voxel line {lineNumber}: {line}");
+                    continue;
+                }
+
+                voxels.Add(new VoxelRecord(position, color, EstimateMass(color), ClassifySurface(color)));
+            }
+
+            return voxels.Count > 0;
+        }
+
+        static bool TryParseVector3Int(string value, int start, int length, out Vector3Int result)
+        {
+            result = default;
+            if (!TryParseBracketedInt3(value, start, length, out var x, out var y, out var z))
+                return false;
+
+            result = new Vector3Int(x, y, z);
+            return true;
+        }
+
+        static bool TryParseColor(string value, int start, int length, out Color32 result)
+        {
+            result = default;
+            if (!TryParseBracketedInt3(value, start, length, out var r, out var g, out var b))
+                return false;
+
+            result = new Color32(ToByte(r), ToByte(g), ToByte(b), 255);
+            return true;
+        }
+
+        static bool TryParseBracketedInt3(string value, int start, int length, out int first, out int second, out int third)
+        {
+            first = default;
+            second = default;
+            third = default;
+
+            var end = start + length - 1;
+            while (start <= end && char.IsWhiteSpace(value[start]))
+                start++;
+
+            while (end >= start && char.IsWhiteSpace(value[end]))
+                end--;
+
+            if (end - start < 4 || value[start] != '[' || value[end] != ']')
+                return false;
+
+            var cursor = start + 1;
+            return TryReadInt(value, ref cursor, end, out first) &&
+                   TryReadSeparator(value, ref cursor, end) &&
+                   TryReadInt(value, ref cursor, end, out second) &&
+                   TryReadSeparator(value, ref cursor, end) &&
+                   TryReadInt(value, ref cursor, end, out third);
+        }
+
+        static bool TryReadSeparator(string value, ref int cursor, int end)
+        {
+            while (cursor < end && char.IsWhiteSpace(value[cursor]))
+                cursor++;
+
+            if (cursor >= end || value[cursor] != ',')
+                return false;
+
+            cursor++;
+            return true;
+        }
+
+        static bool TryReadInt(string value, ref int cursor, int end, out int number)
+        {
+            number = 0;
+            while (cursor < end && char.IsWhiteSpace(value[cursor]))
+                cursor++;
+
+            var sign = 1;
+            if (cursor < end && value[cursor] == '-')
+            {
+                sign = -1;
+                cursor++;
+            }
+
+            var foundDigit = false;
+            while (cursor < end && char.IsDigit(value[cursor]))
+            {
+                foundDigit = true;
+                number = number * 10 + value[cursor] - '0';
+                cursor++;
+            }
+
+            number *= sign;
+            return foundDigit;
+        }
+
+        static Vector3 CalculateCenterOffset(List<VoxelRecord> voxels, float size)
+        {
+            var min = voxels[0].Position;
+            var max = voxels[0].Position;
+
+            for (var i = 1; i < voxels.Count; i++)
+            {
+                min = Vector3Int.Min(min, voxels[i].Position);
+                max = Vector3Int.Max(max, voxels[i].Position);
+            }
+
+            return -((Vector3)(min + max) * 0.5f * size);
+        }
+
+        static byte ToByte(int value) => (byte)Mathf.Clamp(value, byte.MinValue, byte.MaxValue);
+
         Vector3Int WorldToVoxelFloor(Vector3 localPosition)
         {
             return new Vector3Int(
@@ -589,6 +869,32 @@ namespace Destruxion.Voxels
             }
         }
 
+#if UNITY_EDITOR
+        void EnsureMeshReadable(Mesh mesh, string sourceName)
+        {
+            if (mesh == null || mesh.isReadable)
+                return;
+
+            var path = AssetDatabase.GetAssetPath(mesh);
+            if (string.IsNullOrEmpty(path))
+            {
+                Debug.LogWarning($"Mesh source '{sourceName}' is not readable and has no asset path Unity can reimport.", this);
+                return;
+            }
+
+            var modelImporter = AssetImporter.GetAtPath(path) as ModelImporter;
+            if (modelImporter == null)
+            {
+                Debug.LogWarning($"Mesh source '{sourceName}' is not readable, and '{path}' is not a ModelImporter asset.", this);
+                return;
+            }
+
+            modelImporter.isReadable = true;
+            modelImporter.SaveAndReimport();
+            Debug.Log($"Enabled Read/Write on '{path}' so Mesh Voxel Reconstructor can read '{sourceName}'.", this);
+        }
+#endif
+
         static MeshVoxelColorSource GetColorSource(Material[] materials, int submesh)
         {
             var material = materials.Length > 0 ? materials[Mathf.Clamp(submesh, 0, materials.Length - 1)] : null;
@@ -634,6 +940,14 @@ namespace Destruxion.Voxels
                 (byte)(a.g * b.g / 255),
                 (byte)(a.b * b.b / 255),
                 255);
+        }
+
+        static Color32 ShadeStaticFace(Color32 color, Vector3 normal, Vector3Int position)
+        {
+            var lightDirection = new Vector3(-0.35f, 0.8f, -0.45f).normalized;
+            var light = Mathf.Clamp01(Vector3.Dot(normal, lightDirection)) * 0.35f + 0.78f;
+            var variation = 1f + (Hash01(position) - 0.5f) * 0.05f;
+            return Scale(color, light * variation);
         }
 
         Color32 ApplyCubeVariation(Color32 color, Vector3Int position)
@@ -828,6 +1142,36 @@ namespace Destruxion.Voxels
             new(0.75f, 0.75f)
         };
 
+        static readonly Vector3Int[] StaticDirections =
+        {
+            Vector3Int.right,
+            Vector3Int.left,
+            Vector3Int.up,
+            Vector3Int.down,
+            new(0, 0, 1),
+            new(0, 0, -1)
+        };
+
+        static readonly Vector3[,] StaticFaceCorners =
+        {
+            {new(0.5f, -0.5f, -0.5f), new(0.5f, -0.5f, 0.5f), new(0.5f, 0.5f, 0.5f), new(0.5f, 0.5f, -0.5f)},
+            {new(-0.5f, -0.5f, 0.5f), new(-0.5f, -0.5f, -0.5f), new(-0.5f, 0.5f, -0.5f), new(-0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, 0.5f, -0.5f), new(0.5f, 0.5f, -0.5f), new(0.5f, 0.5f, 0.5f), new(-0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, -0.5f, 0.5f), new(0.5f, -0.5f, 0.5f), new(0.5f, -0.5f, -0.5f), new(-0.5f, -0.5f, -0.5f)},
+            {new(0.5f, -0.5f, 0.5f), new(-0.5f, -0.5f, 0.5f), new(-0.5f, 0.5f, 0.5f), new(0.5f, 0.5f, 0.5f)},
+            {new(-0.5f, -0.5f, -0.5f), new(0.5f, -0.5f, -0.5f), new(0.5f, 0.5f, -0.5f), new(-0.5f, 0.5f, -0.5f)}
+        };
+
+        static readonly Vector3[] StaticNormals =
+        {
+            Vector3.right,
+            Vector3.left,
+            Vector3.up,
+            Vector3.down,
+            Vector3.forward,
+            Vector3.back
+        };
+
         readonly struct MeshVoxelColorSource
         {
             public readonly Color32 BaseColor;
@@ -972,6 +1316,18 @@ namespace Destruxion.Voxels
     {
         TargetMaxDimension,
         VoxelSize
+    }
+
+    public enum VoxelSourceMode
+    {
+        Mesh,
+        TextFile
+    }
+
+    public enum VoxelOutputMode
+    {
+        Destructible,
+        StaticVisualOnly
     }
 
     public enum MeshVoxelAlgorithm

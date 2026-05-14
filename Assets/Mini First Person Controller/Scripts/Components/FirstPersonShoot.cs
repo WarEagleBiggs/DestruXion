@@ -1,17 +1,26 @@
 using Destruxion.Voxels;
+using System.Collections;
 using UnityEngine;
 
 public class FirstPersonShoot : MonoBehaviour
 {
     [SerializeField] Camera sourceCamera;
+    [SerializeField] Transform muzzleTransform;
     [SerializeField] float projectileRadius = 0.06f;
     [SerializeField] float impactImpulse = 5f;
     [SerializeField] float projectileMaxDistance = 80f;
     [SerializeField] float spawnForwardOffset = 0.35f;
     [SerializeField] LayerMask hitMask = ~0;
+    [Header("Visuals")]
+    [SerializeField] bool showBulletTracer = true;
+    [SerializeField] Material tracerMaterial;
+    [SerializeField] Color tracerColor = new(1f, 0.72f, 0.22f, 1f);
+    [SerializeField, Min(0.001f)] float tracerWidth = 0.018f;
+    [SerializeField, Min(0.01f)] float tracerDuration = 0.045f;
 
     readonly RaycastHit[] hitBuffer = new RaycastHit[32];
     Collider[] ownerColliders;
+    Material runtimeTracerMaterial;
 
     void Reset()
     {
@@ -22,6 +31,9 @@ public class FirstPersonShoot : MonoBehaviour
     {
         if (sourceCamera == null)
             sourceCamera = GetComponentInChildren<Camera>();
+
+        if (muzzleTransform == null)
+            muzzleTransform = FindMuzzleTransform();
 
         ownerColliders = GetComponentsInChildren<Collider>();
     }
@@ -38,25 +50,34 @@ public class FirstPersonShoot : MonoBehaviour
     {
         var direction = sourceCamera.transform.forward;
         var origin = sourceCamera.transform.position + direction * spawnForwardOffset;
-        FireHitscan(origin, direction);
+        var visualOrigin = muzzleTransform != null ? muzzleTransform.position : origin;
+        var visualEnd = origin + direction * projectileMaxDistance;
+        var didHit = FireHitscan(origin, direction, out var hit);
+
+        if (didHit)
+            visualEnd = hit.Point;
+
+        SpawnTracer(visualOrigin, visualEnd);
     }
 
-    void FireHitscan(Vector3 origin, Vector3 direction)
+    bool FireHitscan(Vector3 origin, Vector3 direction, out ShotHit hit)
     {
-        if (!TryFindFirstHit(origin, direction, out var hit))
-            return;
+        if (!TryFindFirstHit(origin, direction, out hit))
+            return false;
 
         if (hit.World != null)
         {
             hit.World.ActivateVoxelsAround(hit.Point, direction * impactImpulse, projectileRadius);
-            return;
+            return true;
         }
 
         if (hit.Debris != null)
         {
             hit.Debris.BreakApart(direction * impactImpulse);
-            return;
+            return true;
         }
+
+        return true;
     }
 
     bool TryFindFirstHit(Vector3 origin, Vector3 direction, out ShotHit closestHit)
@@ -146,6 +167,100 @@ public class FirstPersonShoot : MonoBehaviour
         }
 
         return false;
+    }
+
+    void SpawnTracer(Vector3 from, Vector3 to)
+    {
+        if (!showBulletTracer || (to - from).sqrMagnitude < 0.0001f)
+            return;
+
+        var tracerObject = new GameObject("Bullet Tracer");
+        var line = tracerObject.AddComponent<LineRenderer>();
+        line.positionCount = 2;
+        line.SetPosition(0, from);
+        line.SetPosition(1, to);
+        line.useWorldSpace = true;
+        line.startWidth = tracerWidth;
+        line.endWidth = tracerWidth * 0.35f;
+        line.numCapVertices = 2;
+        line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        line.receiveShadows = false;
+        line.material = GetTracerMaterial();
+        line.startColor = tracerColor;
+        line.endColor = new Color(tracerColor.r, tracerColor.g, tracerColor.b, 0f);
+
+        StartCoroutine(DestroyTracerAfter(line, tracerDuration));
+    }
+
+    IEnumerator DestroyTracerAfter(LineRenderer line, float duration)
+    {
+        var elapsed = 0f;
+        var start = tracerColor;
+        while (elapsed < duration && line != null)
+        {
+            elapsed += Time.deltaTime;
+            var alpha = Mathf.Clamp01(1f - elapsed / duration);
+            line.startColor = new Color(start.r, start.g, start.b, start.a * alpha);
+            line.endColor = new Color(start.r, start.g, start.b, 0f);
+            yield return null;
+        }
+
+        if (line != null)
+            Destroy(line.gameObject);
+    }
+
+    Material GetTracerMaterial()
+    {
+        if (tracerMaterial != null)
+            return tracerMaterial;
+
+        if (runtimeTracerMaterial != null)
+            return runtimeTracerMaterial;
+
+        runtimeTracerMaterial = new Material(Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color"))
+        {
+            name = "Runtime Bullet Tracer"
+        };
+
+        if (runtimeTracerMaterial.HasProperty("_BaseColor"))
+            runtimeTracerMaterial.SetColor("_BaseColor", tracerColor);
+        if (runtimeTracerMaterial.HasProperty("_Color"))
+            runtimeTracerMaterial.SetColor("_Color", tracerColor);
+
+        return runtimeTracerMaterial;
+    }
+
+    Transform FindMuzzleTransform()
+    {
+        if (sourceCamera == null)
+            return null;
+
+        var cameraTransform = sourceCamera.transform;
+        var result = FindNamedChild(cameraTransform, "muzzle");
+        if (result != null)
+            return result;
+
+        result = FindNamedChild(cameraTransform, "barrel");
+        if (result != null)
+            return result;
+
+        return FindNamedChild(cameraTransform, "tip");
+    }
+
+    static Transform FindNamedChild(Transform root, string namePart)
+    {
+        for (var i = 0; i < root.childCount; i++)
+        {
+            var child = root.GetChild(i);
+            if (child.name.ToLowerInvariant().Contains(namePart))
+                return child;
+
+            var nested = FindNamedChild(child, namePart);
+            if (nested != null)
+                return nested;
+        }
+
+        return null;
     }
 
     readonly struct ShotHit
