@@ -9,7 +9,9 @@ public class FirstPersonShoot : MonoBehaviour
     [SerializeField] float projectileMass = 0.08f;
     [SerializeField] float impactImpulse = 5f;
     [SerializeField] float projectileLifetime = 3f;
+    [SerializeField] float projectileMaxDistance = 80f;
     [SerializeField] float spawnForwardOffset = 0.35f;
+    [SerializeField] float hiddenNearPlayerDistance = 1.1f;
 
     Collider[] ownerColliders;
 
@@ -44,7 +46,7 @@ public class FirstPersonShoot : MonoBehaviour
             body.linearVelocity = direction * projectileSpeed;
 
         if (projectile.TryGetComponent<VoxelProjectile>(out var voxelProjectile))
-            voxelProjectile.Initialize(impactImpulse, projectileLifetime, projectileRadius);
+            voxelProjectile.Initialize(impactImpulse, projectileLifetime, projectileRadius, projectileMaxDistance, hiddenNearPlayerDistance);
 
         IgnoreOwner(projectile);
     }

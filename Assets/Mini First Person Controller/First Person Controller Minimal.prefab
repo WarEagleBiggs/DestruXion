@@ -421,7 +421,9 @@ MonoBehaviour:
   projectileMass: 0.08
   impactImpulse: 5
   projectileLifetime: 3
+  projectileMaxDistance: 80
   spawnForwardOffset: 0.35
+  hiddenNearPlayerDistance: 1.1
 --- !u!1 &5241892580736583940
 GameObject:
   m_ObjectHideFlags: 0

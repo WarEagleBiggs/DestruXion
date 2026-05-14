@@ -6,20 +6,33 @@ public class VoxelProjectile : MonoBehaviour
     float impactImpulse = 5f;
     float radius = 0.06f;
     float bounceSpeedMultiplier = 0.08f;
+    float maxDistance = 80f;
+    float hiddenDistance = 1.1f;
     bool hasHit;
+    bool renderersVisible = true;
     Rigidbody body;
     Vector3 previousPosition;
+    Vector3 spawnPosition;
+    Renderer[] renderers;
 
-    public void Initialize(float impulse, float lifetime, float projectileRadius)
+    public void Initialize(float impulse, float lifetime, float projectileRadius, float projectileMaxDistance, float hiddenNearPlayerDistance)
     {
         impactImpulse = impulse;
         radius = projectileRadius;
+        maxDistance = Mathf.Max(projectileRadius, projectileMaxDistance);
+        hiddenDistance = Mathf.Max(0f, hiddenNearPlayerDistance);
         Destroy(gameObject, lifetime);
+    }
+
+    public void Initialize(float impulse, float lifetime, float projectileRadius)
+    {
+        Initialize(impulse, lifetime, projectileRadius, maxDistance, hiddenDistance);
     }
 
     void Awake()
     {
         body = GetComponent<Rigidbody>();
+        renderers = GetComponentsInChildren<Renderer>();
     }
 
     void Start()
@@ -27,7 +40,9 @@ public class VoxelProjectile : MonoBehaviour
         if (body == null)
             body = GetComponent<Rigidbody>();
 
+        spawnPosition = transform.position;
         previousPosition = transform.position;
+        UpdateVisibility();
     }
 
     void FixedUpdate()
@@ -36,6 +51,14 @@ public class VoxelProjectile : MonoBehaviour
             return;
 
         var currentPosition = transform.position;
+        if ((currentPosition - spawnPosition).sqrMagnitude >= maxDistance * maxDistance)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        UpdateVisibility();
+
         var travel = currentPosition - previousPosition;
         var distance = travel.magnitude;
         var direction = distance > 0.001f ? travel / distance : transform.forward;
@@ -43,10 +66,8 @@ public class VoxelProjectile : MonoBehaviour
         if (distance > 0.001f &&
             Physics.SphereCast(previousPosition, radius, travel / distance, out var hit, distance, ~0, QueryTriggerInteraction.Ignore))
         {
-            if (!hit.collider.transform.IsChildOf(transform) && hit.collider.GetComponentInParent<VoxelWorld>() != null)
-                Hit(hit.collider.GetComponentInParent<VoxelWorld>(), hit.point, hit.normal, direction);
-            else if (!hit.collider.transform.IsChildOf(transform) && hit.collider.GetComponentInParent<VoxelDebrisChunk>() != null)
-                HitDebris(hit.collider.GetComponentInParent<VoxelDebrisChunk>(), hit.point, hit.normal, direction);
+            if (!hit.collider.transform.IsChildOf(transform))
+                HitCollider(hit.collider, hit.point, hit.normal, direction);
         }
 
         if (!hasHit && TryFindVoxelDataImpact(previousPosition, currentPosition, direction, out var world, out var hitPoint, out var hitNormal))
@@ -69,11 +90,38 @@ public class VoxelProjectile : MonoBehaviour
 
         var world = collision.collider.GetComponentInParent<VoxelWorld>();
         if (world != null)
+        {
             Hit(world, collision.contactCount > 0 ? contact.point : transform.position, collision.contactCount > 0 ? contact.normal : -fallbackDirection, fallbackDirection);
+            return;
+        }
 
         var debris = collision.collider.GetComponentInParent<VoxelDebrisChunk>();
         if (debris != null)
+        {
             HitDebris(debris, collision.contactCount > 0 ? contact.point : transform.position, collision.contactCount > 0 ? contact.normal : -fallbackDirection, fallbackDirection);
+            return;
+        }
+
+        DestroyOnCollision();
+    }
+
+    void HitCollider(Collider hitCollider, Vector3 hitPoint, Vector3 hitNormal, Vector3 direction)
+    {
+        var world = hitCollider.GetComponentInParent<VoxelWorld>();
+        if (world != null)
+        {
+            Hit(world, hitPoint, hitNormal, direction);
+            return;
+        }
+
+        var debris = hitCollider.GetComponentInParent<VoxelDebrisChunk>();
+        if (debris != null)
+        {
+            HitDebris(debris, hitPoint, hitNormal, direction);
+            return;
+        }
+
+        DestroyOnCollision();
     }
 
     bool TryFindVoxelDataImpact(Vector3 from, Vector3 to, Vector3 direction, out VoxelWorld hitWorld, out Vector3 hitPoint, out Vector3 hitNormal)
@@ -131,6 +179,29 @@ public class VoxelProjectile : MonoBehaviour
         if (TryGetComponent<Collider>(out var projectileCollider))
             projectileCollider.enabled = false;
 
-        Destroy(gameObject, 0.35f);
+        Destroy(gameObject, 0.18f);
+    }
+
+    void DestroyOnCollision()
+    {
+        hasHit = true;
+        Destroy(gameObject);
+    }
+
+    void UpdateVisibility()
+    {
+        var shouldBeVisible = (transform.position - spawnPosition).sqrMagnitude >= hiddenDistance * hiddenDistance;
+        if (shouldBeVisible == renderersVisible)
+            return;
+
+        renderersVisible = shouldBeVisible;
+        if (renderers == null)
+            return;
+
+        for (var i = 0; i < renderers.Length; i++)
+        {
+            if (renderers[i] != null)
+                renderers[i].enabled = shouldBeVisible;
+        }
     }
 }
