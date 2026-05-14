@@ -371,6 +371,8 @@ namespace Destruxion.Voxels
 
     public sealed partial class VoxelWorld : MonoBehaviour
     {
+        static readonly List<VoxelWorld> activeWorlds = new();
+
         [SerializeField, Min(0.01f)] float voxelSize = 0.1f;
         [SerializeField, Min(1)] int chunkSize = 16;
         [SerializeField] float damageRadiusMultiplier = 1.35f;
@@ -392,6 +394,7 @@ namespace Destruxion.Voxels
         readonly Dictionary<Vector3Int, VoxelChunk> chunks = new();
         readonly Dictionary<Vector3Int, List<VoxelRecord>> chunkVoxelCache = new();
 
+        public static IReadOnlyList<VoxelWorld> ActiveWorlds => activeWorlds;
         public int ChunkCount => chunks.Count;
         public float VoxelSize => voxelSize;
         public float DamageRadiusMultiplier => damageRadiusMultiplier;
@@ -402,11 +405,19 @@ namespace Destruxion.Voxels
 
         void OnEnable()
         {
+            if (!activeWorlds.Contains(this))
+                activeWorlds.Add(this);
+
             if (voxels.Count == 0 && serializedVoxels.Count > 0)
             {
                 RestoreSerializedVoxels();
                 CacheExistingChunks();
             }
+        }
+
+        void OnDisable()
+        {
+            activeWorlds.Remove(this);
         }
 
         public void BuildFrom(
@@ -474,6 +485,17 @@ namespace Destruxion.Voxels
 
         public bool ContainsVoxel(Vector3Int position) => voxels.ContainsKey(position);
 
+        float WorldVoxelSize => voxelSize * WorldScale;
+
+        float WorldScale
+        {
+            get
+            {
+                var scale = transform.lossyScale;
+                return Mathf.Max(0.0001f, (Mathf.Abs(scale.x) + Mathf.Abs(scale.y) + Mathf.Abs(scale.z)) / 3f);
+            }
+        }
+
         public Vector3 VoxelToLocalCenter(Vector3Int position) => (Vector3)position * voxelSize + originOffset;
 
         public Vector3 LocalToWorldCenter(Vector3Int position) => transform.TransformPoint(VoxelToLocalCenter(position));
@@ -496,9 +518,9 @@ namespace Destruxion.Voxels
                 return false;
 
             var distance = Vector3.Distance(worldFrom, worldTo);
-            var stepDistance = Mathf.Max(voxelSize * 0.25f, 0.01f);
+            var stepDistance = Mathf.Max(WorldVoxelSize * 0.25f, 0.01f);
             var steps = Mathf.Max(1, Mathf.CeilToInt(distance / stepDistance));
-            var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(sweepRadius / voxelSize));
+            var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(sweepRadius / WorldVoxelSize));
 
             for (var i = 0; i <= steps; i++)
             {
@@ -528,7 +550,7 @@ namespace Destruxion.Voxels
         public void ActivateVoxelsAround(Vector3 worldPosition, Vector3 impulse, float projectileRadius)
         {
             var center = WorldToVoxel(worldPosition);
-            var effectiveRadius = Mathf.Max(voxelSize * 0.5f, projectileRadius * damageRadiusMultiplier);
+            var effectiveRadius = Mathf.Max(voxelSize * 0.5f, projectileRadius * damageRadiusMultiplier / WorldScale);
             var radiusVoxels = Mathf.Max(1, Mathf.CeilToInt(effectiveRadius / voxelSize));
             var projectileVoxelRadius = Mathf.Max(1f, effectiveRadius / voxelSize);
             var projectileScaledLimit = Mathf.CeilToInt(projectileVoxelRadius * projectileVoxelRadius * 2f);
@@ -779,12 +801,12 @@ namespace Destruxion.Voxels
             body.mass = Mathf.Max(0.05f, totalMass);
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             body.AddForce(impulse, ForceMode.Impulse);
-            body.AddTorque(UnityEngine.Random.insideUnitSphere * impulse.magnitude * voxelSize, ForceMode.Impulse);
+            body.AddTorque(UnityEngine.Random.insideUnitSphere * impulse.magnitude * WorldVoxelSize, ForceMode.Impulse);
 
             root.AddComponent<VoxelDebrisChunk>().Initialize(
                 Mathf.Max(minimumImpactImpulse * 1.25f, impulse.magnitude * 0.2f),
                 group.ToArray(),
-                voxelSize,
+                WorldVoxelSize,
                 voxelMaterial);
         }
 
@@ -810,7 +832,7 @@ namespace Destruxion.Voxels
                     var vertexIndex = vertices.Count;
                     for (var corner = 0; corner < 4; corner++)
                     {
-                        vertices.Add(localCenter + DebrisFaceCorners[face, corner] * voxelSize);
+                        vertices.Add(localCenter + DebrisFaceCorners[face, corner] * WorldVoxelSize);
                         normals.Add(DebrisNormals[face]);
                         colors.Add(group[i].Color);
                     }
@@ -839,7 +861,10 @@ namespace Destruxion.Voxels
             mesh.RecalculateBounds();
 
             root.AddComponent<MeshFilter>().sharedMesh = mesh;
-            root.AddComponent<MeshRenderer>().sharedMaterial = voxelMaterial;
+            var renderer = root.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = voxelMaterial;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            renderer.receiveShadows = true;
         }
 
         void AddDebrisColliders(GameObject root, List<VoxelRecord> group)
@@ -848,7 +873,7 @@ namespace Destruxion.Voxels
             {
                 var collider = root.AddComponent<BoxCollider>();
                 collider.center = root.transform.InverseTransformPoint(LocalToWorldCenter(group[i].Position));
-                collider.size = Vector3.one * voxelSize;
+                collider.size = Vector3.one * WorldVoxelSize;
             }
         }
 
@@ -1101,7 +1126,10 @@ namespace Destruxion.Voxels
             mesh.RecalculateBounds();
 
             GetComponent<MeshFilter>().sharedMesh = mesh;
-            GetComponent<MeshRenderer>().sharedMaterial = material;
+            var renderer = GetComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            renderer.receiveShadows = true;
 
             if (generateCollider)
             {
@@ -1137,7 +1165,7 @@ namespace Destruxion.Voxels
                 {
                     vertices.Add(center + FaceCorners[face, corner] * world.VoxelSize);
                     normals.Add(Normals[face]);
-                    colors.Add(voxel.Color);
+                    colors.Add(ShadeFace(voxel.Color, Normals[face], voxel.Position));
                 }
 
                 triangles.Add(vertexIndex);
@@ -1151,6 +1179,31 @@ namespace Destruxion.Voxels
 
         void OnCollisionEnter(Collision collision)
         {
+        }
+
+        static Color32 ShadeFace(Color32 color, Vector3 normal, Vector3Int position)
+        {
+            var lightDirection = new Vector3(-0.35f, 0.8f, -0.45f).normalized;
+            var light = Mathf.Clamp01(Vector3.Dot(normal, lightDirection)) * 0.35f + 0.78f;
+            var variation = 1f + (Hash01(position) - 0.5f) * 0.05f;
+            var factor = light * variation;
+
+            return new Color32(
+                (byte)Mathf.Clamp(Mathf.RoundToInt(color.r * factor), 0, 255),
+                (byte)Mathf.Clamp(Mathf.RoundToInt(color.g * factor), 0, 255),
+                (byte)Mathf.Clamp(Mathf.RoundToInt(color.b * factor), 0, 255),
+                color.a);
+        }
+
+        static float Hash01(Vector3Int position)
+        {
+            unchecked
+            {
+                var hash = position.x * 73856093 ^ position.y * 19349663 ^ position.z * 83492791;
+                hash ^= hash >> 13;
+                hash *= 1274126177;
+                return (hash & 0x00FFFFFF) / 16777215f;
+            }
         }
 
         static void DestroyUnityObject(UnityEngine.Object target)
@@ -1264,6 +1317,8 @@ namespace Destruxion.Voxels
 
             var renderer = cube.GetComponent<Renderer>();
             renderer.sharedMaterial = voxelMaterial;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            renderer.receiveShadows = true;
             var propertyBlock = new MaterialPropertyBlock();
             propertyBlock.SetColor("_BaseColor", voxel.Color);
             propertyBlock.SetColor("_Color", voxel.Color);

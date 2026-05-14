@@ -13,14 +13,52 @@ public class VoxelProjectile : MonoBehaviour
     Rigidbody body;
     Vector3 previousPosition;
     Vector3 spawnPosition;
+    Vector3 direction = Vector3.forward;
+    float speed = 45f;
+    float traveledDistance;
+    bool initialized;
     Renderer[] renderers;
 
     public void Initialize(float impulse, float lifetime, float projectileRadius, float projectileMaxDistance, float hiddenNearPlayerDistance)
+    {
+        Initialize(impulse, lifetime, projectileRadius, projectileMaxDistance, hiddenNearPlayerDistance, transform.position, transform.forward, speed);
+    }
+
+    public void Initialize(
+        float impulse,
+        float lifetime,
+        float projectileRadius,
+        float projectileMaxDistance,
+        float hiddenNearPlayerDistance,
+        Vector3 startPosition,
+        Vector3 shotDirection,
+        float projectileSpeed)
     {
         impactImpulse = impulse;
         radius = projectileRadius;
         maxDistance = Mathf.Max(projectileRadius, projectileMaxDistance);
         hiddenDistance = Mathf.Max(0f, hiddenNearPlayerDistance);
+        spawnPosition = startPosition;
+        previousPosition = startPosition;
+        direction = shotDirection.sqrMagnitude > 0.001f ? shotDirection.normalized : transform.forward;
+        speed = Mathf.Max(0.01f, projectileSpeed);
+        traveledDistance = 0f;
+        initialized = true;
+        transform.SetPositionAndRotation(startPosition, Quaternion.LookRotation(direction));
+
+        if (body == null)
+            body = GetComponent<Rigidbody>();
+
+        if (body != null)
+        {
+            body.useGravity = false;
+            body.isKinematic = true;
+            body.position = startPosition;
+            body.linearVelocity = Vector3.zero;
+            body.angularVelocity = Vector3.zero;
+        }
+
+        UpdateVisibility();
         Destroy(gameObject, lifetime);
     }
 
@@ -40,8 +78,14 @@ public class VoxelProjectile : MonoBehaviour
         if (body == null)
             body = GetComponent<Rigidbody>();
 
-        spawnPosition = transform.position;
-        previousPosition = transform.position;
+        if (!initialized)
+        {
+            spawnPosition = transform.position;
+            previousPosition = transform.position;
+            direction = transform.forward;
+            initialized = true;
+        }
+
         UpdateVisibility();
     }
 
@@ -50,8 +94,14 @@ public class VoxelProjectile : MonoBehaviour
         if (hasHit)
             return;
 
-        var currentPosition = transform.position;
-        if ((currentPosition - spawnPosition).sqrMagnitude >= maxDistance * maxDistance)
+        if (!initialized)
+            return;
+
+        var stepDistance = speed * Time.fixedDeltaTime;
+        var currentPosition = previousPosition;
+        var targetPosition = currentPosition + direction * stepDistance;
+
+        if (traveledDistance >= maxDistance)
         {
             Destroy(gameObject);
             return;
@@ -59,23 +109,31 @@ public class VoxelProjectile : MonoBehaviour
 
         UpdateVisibility();
 
-        var travel = currentPosition - previousPosition;
+        var travel = targetPosition - currentPosition;
         var distance = travel.magnitude;
-        var direction = distance > 0.001f ? travel / distance : transform.forward;
+        var shotDirection = distance > 0.001f ? travel / distance : direction;
 
         if (distance > 0.001f &&
-            Physics.SphereCast(previousPosition, radius, travel / distance, out var hit, distance, ~0, QueryTriggerInteraction.Ignore))
+            Physics.SphereCast(currentPosition, radius, shotDirection, out var hit, distance, ~0, QueryTriggerInteraction.Ignore))
         {
             if (!hit.collider.transform.IsChildOf(transform))
-                HitCollider(hit.collider, hit.point, hit.normal, direction);
+                HitCollider(hit.collider, hit.point, hit.normal, shotDirection);
         }
 
-        if (!hasHit && TryFindVoxelDataImpact(previousPosition, currentPosition, direction, out var world, out var hitPoint, out var hitNormal))
+        if (!hasHit && TryFindVoxelDataImpact(currentPosition, targetPosition, shotDirection, out var world, out var hitPoint, out var hitNormal))
         {
-            Hit(world, hitPoint, hitNormal, direction);
+            Hit(world, hitPoint, hitNormal, shotDirection);
         }
 
-        previousPosition = currentPosition;
+        if (hasHit)
+            return;
+
+        traveledDistance += distance;
+        previousPosition = targetPosition;
+        if (body != null)
+            body.MovePosition(targetPosition);
+        else
+            transform.position = targetPosition;
     }
 
     void OnCollisionEnter(Collision collision)
@@ -86,7 +144,7 @@ public class VoxelProjectile : MonoBehaviour
         var contact = collision.contactCount > 0 ? collision.GetContact(0) : default;
         var fallbackDirection = body != null && body.linearVelocity.sqrMagnitude > 0.001f
             ? body.linearVelocity.normalized
-            : transform.forward;
+            : direction;
 
         var world = collision.collider.GetComponentInParent<VoxelWorld>();
         if (world != null)
@@ -126,8 +184,8 @@ public class VoxelProjectile : MonoBehaviour
 
     bool TryFindVoxelDataImpact(Vector3 from, Vector3 to, Vector3 direction, out VoxelWorld hitWorld, out Vector3 hitPoint, out Vector3 hitNormal)
     {
-        var worlds = FindObjectsByType<VoxelWorld>();
-        for (var i = 0; i < worlds.Length; i++)
+        var worlds = VoxelWorld.ActiveWorlds;
+        for (var i = 0; i < worlds.Count; i++)
         {
             if (worlds[i] != null && worlds[i].TryFindVoxelImpact(from, to, radius, out hitPoint, out hitNormal))
             {
@@ -170,9 +228,9 @@ public class VoxelProjectile : MonoBehaviour
 
         if (body != null)
         {
-            var speed = body.linearVelocity.magnitude;
-            var bounceDirection = Vector3.Reflect(body.linearVelocity.sqrMagnitude > 0.001f ? body.linearVelocity.normalized : transform.forward, hitNormal.normalized);
+            var bounceDirection = Vector3.Reflect(direction, hitNormal.normalized);
             body.position = hitPoint + hitNormal.normalized * (radius + 0.02f);
+            body.isKinematic = false;
             body.linearVelocity = bounceDirection * speed * bounceSpeedMultiplier;
         }
 
