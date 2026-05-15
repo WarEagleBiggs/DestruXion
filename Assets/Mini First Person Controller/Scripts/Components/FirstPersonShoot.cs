@@ -1,8 +1,9 @@
 using Destruxion.Voxels;
 using System.Collections;
+using Unity.Netcode;
 using UnityEngine;
 
-public class FirstPersonShoot : MonoBehaviour
+public class FirstPersonShoot : NetworkBehaviour
 {
     [SerializeField] Camera sourceCamera;
     [SerializeField] Transform muzzleTransform;
@@ -40,6 +41,9 @@ public class FirstPersonShoot : MonoBehaviour
 
     void Update()
     {
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening && !IsOwner)
+            return;
+
         if (!MiniFirstPersonInput.FirePressed || sourceCamera == null)
             return;
 
@@ -51,6 +55,18 @@ public class FirstPersonShoot : MonoBehaviour
         var direction = sourceCamera.transform.forward;
         var origin = sourceCamera.transform.position + direction * spawnForwardOffset;
         var visualOrigin = muzzleTransform != null ? muzzleTransform.position : origin;
+
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening)
+        {
+            FireShotServerRpc(origin, direction, visualOrigin);
+            return;
+        }
+
+        FireLocal(origin, direction, visualOrigin);
+    }
+
+    void FireLocal(Vector3 origin, Vector3 direction, Vector3 visualOrigin)
+    {
         var visualEnd = origin + direction * projectileMaxDistance;
         var didHit = FireHitscan(origin, direction, out var hit);
 
@@ -58,6 +74,22 @@ public class FirstPersonShoot : MonoBehaviour
             visualEnd = hit.Point;
 
         SpawnTracer(visualOrigin, visualEnd);
+    }
+
+    [ServerRpc]
+    void FireShotServerRpc(Vector3 origin, Vector3 direction, Vector3 visualOrigin)
+    {
+        FireLocal(origin, direction.normalized, visualOrigin);
+        FireShotClientRpc(origin, direction.normalized, visualOrigin);
+    }
+
+    [ClientRpc]
+    void FireShotClientRpc(Vector3 origin, Vector3 direction, Vector3 visualOrigin)
+    {
+        if (IsServer)
+            return;
+
+        FireLocal(origin, direction.normalized, visualOrigin);
     }
 
     bool FireHitscan(Vector3 origin, Vector3 direction, out ShotHit hit)
