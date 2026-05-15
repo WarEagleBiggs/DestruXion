@@ -15,7 +15,7 @@ namespace Destruxion.Voxels
         [SerializeField] TextAsset voxelTextFile;
 
         [Header("Build")]
-        [SerializeField, Min(0.01f)] float voxelSize = 0.02f;
+        [SerializeField, Min(0.01f)] float voxelSize = 0.2f;
         [SerializeField] bool centerOnOrigin = true;
 
         [Header("Destruction")]
@@ -61,15 +61,14 @@ namespace Destruxion.Voxels
             ClearGeneratedChildren();
             ApplyDamageProfile();
 
-            generatedRoot = new GameObject($"{voxelTextFile.name}_VoxelWorld");
-            generatedRoot.transform.SetParent(transform, false);
+            generatedRoot = CreateGeneratedRoot($"{voxelTextFile.name}_VoxelWorld");
             generatedRoot.isStatic = markStatic;
 
             var offset = centerOnOrigin ? CalculateCenterOffset(voxels) : Vector3.zero;
             var world = generatedRoot.AddComponent<VoxelWorld>();
             world.BuildFrom(voxels, voxelSize, chunkSize, offset, GetVoxelMaterial(), generateColliders, markStatic, damageRadiusMultiplier, maxVoxelsPerHit, debrisChunkSize);
 
-            Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}' in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Parse: {parseMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, build: {(stopwatch.ElapsedMilliseconds - parseMilliseconds).ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
+            Debug.Log($"Reconstructed {count.ToString(CultureInfo.InvariantCulture)} voxels as {world.ChunkCount.ToString(CultureInfo.InvariantCulture)} optimized chunks from '{voxelTextFile.name}' at global voxel size {voxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Parse: {parseMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, build: {(stopwatch.ElapsedMilliseconds - parseMilliseconds).ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
         }
 
         public void ClearGeneratedChildren()
@@ -87,6 +86,24 @@ namespace Destruxion.Voxels
                     child.name.EndsWith("_VoxelWorld", StringComparison.Ordinal))
                     DestroyUnityObject(child);
             }
+        }
+
+        GameObject CreateGeneratedRoot(string rootName)
+        {
+            var root = new GameObject(rootName);
+            root.transform.SetParent(transform, false);
+            root.transform.localPosition = Vector3.zero;
+            root.transform.localRotation = Quaternion.identity;
+            root.transform.localScale = InverseScale(transform.lossyScale);
+            return root;
+        }
+
+        static Vector3 InverseScale(Vector3 scale)
+        {
+            return new Vector3(
+                Mathf.Abs(scale.x) > 0.000001f ? 1f / scale.x : 1f,
+                Mathf.Abs(scale.y) > 0.000001f ? 1f / scale.y : 1f,
+                Mathf.Abs(scale.z) > 0.000001f ? 1f / scale.z : 1f);
         }
 
         static bool TryParse(string text, out List<VoxelRecord> voxels)

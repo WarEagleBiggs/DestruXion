@@ -21,7 +21,7 @@ namespace Destruxion.Voxels
         [SerializeField] bool centerTextVoxelsOnOrigin = true;
 
         [Header("Build")]
-        [SerializeField, Min(0.01f)] float voxelSize = 0.05f;
+        [SerializeField, Min(0.01f)] float voxelSize = 0.2f;
         [SerializeField] MeshVoxelResolutionMode resolutionMode = MeshVoxelResolutionMode.TargetMaxDimension;
         [SerializeField, Min(8)] int targetResolution = 192;
         [SerializeField] MeshVoxelAlgorithm algorithm = MeshVoxelAlgorithm.AccurateRaycast;
@@ -38,7 +38,7 @@ namespace Destruxion.Voxels
         [SerializeField] Material voxelMaterial;
         [SerializeField, HideInInspector] GameObject generatedRoot;
         [SerializeField, HideInInspector] int lastFingerprint;
-        [SerializeField, HideInInspector] float activeVoxelSize = 0.05f;
+        [SerializeField, HideInInspector] float activeVoxelSize = 0.2f;
 
         void Reset()
         {
@@ -100,9 +100,7 @@ namespace Destruxion.Voxels
             var voxelizeMilliseconds = stopwatch.ElapsedMilliseconds - triangleMilliseconds;
             ClearGeneratedChildren();
 
-            generatedRoot = new GameObject(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{sourceRoot.name}_VoxelVisual" : $"{sourceRoot.name}_VoxelWorld");
-            generatedRoot.transform.SetParent(transform, false);
-            generatedRoot.isStatic = true;
+            generatedRoot = CreateGeneratedRoot(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{sourceRoot.name}_VoxelVisual" : $"{sourceRoot.name}_VoxelWorld");
 
             var chunkCount = 1;
             if (outputMode == VoxelOutputMode.StaticVisualOnly)
@@ -130,7 +128,7 @@ namespace Destruxion.Voxels
             SetSourceRenderersVisible(!hideSourceRenderers);
             lastFingerprint = CalculateFingerprint();
 
-            Debug.Log($"Voxelized '{sourceRoot.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Triangles: {triangleMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, voxelize: {voxelizeMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
+            Debug.Log($"Voxelized '{sourceRoot.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at global voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms. Triangles: {triangleMilliseconds.ToString(CultureInfo.InvariantCulture)} ms, voxelize: {voxelizeMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
         }
 
         void ReconstructFromText(System.Diagnostics.Stopwatch stopwatch)
@@ -151,9 +149,7 @@ namespace Destruxion.Voxels
             SetSourceRenderersVisible(true);
             activeVoxelSize = Mathf.Max(0.001f, voxelSize);
 
-            generatedRoot = new GameObject(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{voxelTextFile.name}_VoxelVisual" : $"{voxelTextFile.name}_VoxelWorld");
-            generatedRoot.transform.SetParent(transform, false);
-            generatedRoot.isStatic = true;
+            generatedRoot = CreateGeneratedRoot(outputMode == VoxelOutputMode.StaticVisualOnly ? $"{voxelTextFile.name}_VoxelVisual" : $"{voxelTextFile.name}_VoxelWorld");
 
             var offset = centerTextVoxelsOnOrigin ? CalculateCenterOffset(voxels, activeVoxelSize) : Vector3.zero;
             var chunkCount = 1;
@@ -179,7 +175,7 @@ namespace Destruxion.Voxels
                 chunkCount = world.ChunkCount;
             }
 
-            Debug.Log($"Reconstructed text voxel file '{voxelTextFile.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
+            Debug.Log($"Reconstructed text voxel file '{voxelTextFile.name}' into {voxels.Count.ToString(CultureInfo.InvariantCulture)} voxels across {chunkCount.ToString(CultureInfo.InvariantCulture)} {(outputMode == VoxelOutputMode.StaticVisualOnly ? "visual mesh" : "chunks")} at global voxel size {activeVoxelSize.ToString(CultureInfo.InvariantCulture)} in {stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.", generatedRoot);
         }
 
         public void ClearGeneratedChildren()
@@ -198,6 +194,25 @@ namespace Destruxion.Voxels
             }
 
             SetSourceRenderersVisible(true);
+        }
+
+        GameObject CreateGeneratedRoot(string rootName)
+        {
+            var root = new GameObject(rootName);
+            root.transform.SetParent(transform, false);
+            root.transform.localPosition = Vector3.zero;
+            root.transform.localRotation = Quaternion.identity;
+            root.transform.localScale = InverseScale(transform.lossyScale);
+            root.isStatic = true;
+            return root;
+        }
+
+        static Vector3 InverseScale(Vector3 scale)
+        {
+            return new Vector3(
+                Mathf.Abs(scale.x) > 0.000001f ? 1f / scale.x : 1f,
+                Mathf.Abs(scale.y) > 0.000001f ? 1f / scale.y : 1f,
+                Mathf.Abs(scale.z) > 0.000001f ? 1f / scale.z : 1f);
         }
 
         List<MeshVoxelSource> CollectMeshSources()
@@ -243,7 +258,7 @@ namespace Destruxion.Voxels
             triangles = new List<VoxelTriangle>();
             bounds = default;
             var hasBounds = false;
-            var worldToLocal = transform.worldToLocalMatrix;
+            var worldToBakeSpace = Matrix4x4.TRS(transform.position, transform.rotation, Vector3.one).inverse;
 
             try
             {
@@ -259,7 +274,7 @@ namespace Destruxion.Voxels
                         var vertices = mesh.vertices;
                         var renderer = sourceMesh.Renderer;
                         var materials = renderer != null ? renderer.sharedMaterials : Array.Empty<Material>();
-                        var matrix = worldToLocal * sourceMesh.LocalToWorld;
+                        var matrix = worldToBakeSpace * sourceMesh.LocalToWorld;
                         var uvs = mesh.uv;
                         var colors = mesh.colors32;
                         var hasUvs = uvs != null && uvs.Length == vertices.Length;
